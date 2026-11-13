@@ -5,6 +5,7 @@ add_library(glasir_app_core STATIC
     backdrop.cpp
     bug_report.cpp
     components.cpp
+    display.cpp
     files.cpp
     gpu.cpp
     http.cpp

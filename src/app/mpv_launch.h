@@ -12,6 +12,7 @@
 
 #include "capture.h"
 #include "devices.h"
+#include "display.h"
 #include "settings.h"
 
 namespace glasir {
@@ -39,6 +40,12 @@ struct MpvPlan {
 
     // The GPU's video super resolution for scaling = vsr: vsr_kind().
     std::wstring vsr = L"none";
+
+    // The screen mpv opens on (display.h): HDR and brightness decide how an
+    // HDR capture is put out.
+    DisplayInfo display;
+    // The GPU mpv renders on (--d3d11-adapter), empty: mpv's own choice.
+    std::wstring d3d11_adapter;
 };
 
 // mpv's arguments (without the program).

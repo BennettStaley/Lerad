@@ -68,6 +68,7 @@ std::vector<std::wstring> mpv_arguments(const MpvPlan &plan, const Settings &s) 
         a.push_back(L"--geometry=1280x720");
     }
     if (!plan.log_file.empty()) a.push_back(L"--log-file=" + plan.log_file);
+    if (!plan.d3d11_adapter.empty()) a.push_back(L"--d3d11-adapter=" + plan.d3d11_adapter);
 
     // Sound: glasir_audio.dll (portable_config\scripts) plays the card's
     // audio input; mpv's volume and mute drive it.

@@ -12,6 +12,7 @@
 //   Glasir.exe [--play] [--settings FILE] [--set section.key=value ...] [--no-dialogs]
 //   Glasir.exe --input-raw FILE|- [--raw-format nv12|p010|yuy2|uyvy] --set capture.width=W ...
 //   Glasir.exe --list
+//   Glasir.exe --system
 //   Glasir.exe --version
 //   Glasir.exe --setup [--components mpv,reshade,dlss5] [--no-dialogs]
 //   Glasir.exe --update [--no-dialogs]
@@ -61,6 +62,7 @@
 #include "capture.h"
 #include "components.h"
 #include "devices.h"
+#include "display.h"
 #include "files.h"
 #include "glasir_version.h"
 #include "launcher.h"
@@ -90,6 +92,7 @@ struct Args {
     std::wstring components;  // --setup: what to download, comma-separated
     std::wstring update_from;  // --update-from: a release zip
     bool list = false;
+    bool system = false;  // --system: what Glasir found out about this PC
     bool version = false;
     bool setup = false;
     bool update = false;
@@ -149,6 +152,8 @@ bool parse_args(Args &a, std::wstring &error) {
         };
         if (arg == L"--list") {
             a.list = true;
+        } else if (arg == L"--system") {
+            a.system = true;
         } else if (arg == L"--version") {
             a.version = true;
         } else if (arg == L"--play") {
@@ -247,6 +252,13 @@ std::wstring device_list_text() {
     }
     if (text.empty()) text = L"No capture devices found.\n";
     return text;
+}
+
+// --system: the GPU and the screen as Glasir sees them.
+std::wstring system_text() {
+    const GpuInfo gpu = display_gpu();
+    return L"GPU: " + (gpu.found ? gpu.name : std::wstring(L"unknown")) + L"\nDisplay: " +
+           display_text(primary_display()) + L"\n";
 }
 
 // One Glasir at a time: a second one asks the first to close (it ends its
@@ -822,6 +834,8 @@ int run(const Args &args, bool again, bool &stuck, bool &restart) {
     CreateDirectoryW(plan.screenshot_dir.c_str(), nullptr);
     const GpuInfo gpu = display_gpu();
     plan.vsr = vsr_kind(gpu);
+    plan.display = primary_display();
+    log(L"display: {}", display_text(plan.display));
     if (reshade_installed(engine)) {
         // DLSS 5: auto runs it on an RTX 30, 40 or 50 GPU; on tries any GPU.
         const bool installed = dlss5_installed(engine);
@@ -858,6 +872,20 @@ int run(const Args &args, bool again, bool &stuck, bool &restart) {
     SetEnvironmentVariableW(L"GLASIR_SETTINGS", settings_path.c_str());
     SetEnvironmentVariableW(L"GLASIR_VIDEO_MODE", s.hdr ? L"hdr" : L"sdr");
     SetEnvironmentVariableW(L"GLASIR_HDR_AVAILABLE", src.hdr_available ? L"1" : L"0");
+    // What Glasir found out about the screen, for the add-ons inside mpv.
+    // VRR: "on", "off" or "unknown" (glasir.ini's display.vrr, else as found).
+    {
+        const DisplayInfo &d = plan.display;
+        const wchar_t *vrr = s.vrr == Settings::Vrr::On    ? L"on"
+                             : s.vrr == Settings::Vrr::Off ? L"off"
+                             : d.vrr == DisplayInfo::Vrr::On ? L"on"
+                             : d.vrr == DisplayInfo::Vrr::Unsupported ? L"off"
+                                                                      : L"unknown";
+        SetEnvironmentVariableW(L"GLASIR_DISPLAY_VRR", vrr);
+        SetEnvironmentVariableW(L"GLASIR_DISPLAY_HZ", std::format(L"{:.3f}", d.refresh_hz).c_str());
+        const double paper = s.paper_white_nits > 0 ? s.paper_white_nits : d.sdr_white_nits > 0 ? d.sdr_white_nits : 203.0;
+        SetEnvironmentVariableW(L"GLASIR_PAPER_WHITE_NITS", std::format(L"{:.0f}", paper).c_str());
+    }
     SetEnvironmentVariableW(L"GLASIR_WINDOW_MODE",
                             s.fullscreen ? L"fullscreen" : s.borderless ? L"borderless" : L"windowed");
     MpvProcess mpv;
@@ -1237,6 +1265,8 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     UpdateCheck update;  // the launcher's; ends with Glasir, so Play never waits for it
     if (args.list) {
         print(device_list_text(), args.dialogs);
+    } else if (args.system) {
+        print(system_text(), args.dialogs);
     } else {
         const std::wstring dir = app_dir();
         CreateDirectoryW((dir + L"\\logs").c_str(), nullptr);

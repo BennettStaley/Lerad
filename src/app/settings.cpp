@@ -101,6 +101,46 @@ bool apply(Settings &s, const std::wstring &section, const std::wstring &key, co
     } else if (name == L"video.hdr_peak_nits") {
         if (!parse_int(value, 80, 10000, n)) return bad(L"80 to 10000");
         s.hdr_peak_nits = int(n);
+    } else if (name == L"hdr.output") {
+        const std::wstring l = lower(value);
+        if (l == L"auto") s.hdr_output = Settings::HdrOutput::Auto;
+        else if (l == L"hdr") s.hdr_output = Settings::HdrOutput::Hdr;
+        else if (l == L"sdr") s.hdr_output = Settings::HdrOutput::Sdr;
+        else return bad(L"auto, hdr or sdr");
+    } else if (name == L"hdr.display_peak_nits") {
+        if (!parse_int(value, 0, 10000, n) || (n && n < 80)) return bad(L"0 or 80 to 10000");
+        s.display_peak_nits = int(n);
+    } else if (name == L"hdr.tone_mapping") {
+        const std::wstring l = lower(value);
+        bool known = false;
+        for (const auto &t : tone_mapping_names()) known = known || t == l;
+        if (!known) return bad(L"auto, clip, spline, bt.2390, bt.2446a, st2094-40, st2094-10, mobius, reinhard, "
+                               L"hable, gamma or linear");
+        s.tone_mapping = l;
+    } else if (name == L"hdr.dynamic_peak") {
+        if (!parse_bool(value, b)) return bad(L"1 or 0");
+        s.hdr_dynamic_peak = b;
+    } else if (name == L"hdr.paper_white_nits") {
+        if (!parse_int(value, 0, 1000, n) || (n && n < 80)) return bad(L"0 or 80 to 1000");
+        s.paper_white_nits = int(n);
+    } else if (name == L"display.vrr") {
+        const std::wstring l = lower(value);
+        if (l == L"auto") s.vrr = Settings::Vrr::Auto;
+        else if (l == L"on" || l == L"1") s.vrr = Settings::Vrr::On;
+        else if (l == L"off" || l == L"0") s.vrr = Settings::Vrr::Off;
+        else return bad(L"auto, on or off");
+    } else if (name == L"display.gpu") {
+        s.gpu = value;
+    } else if (name == L"display.monitor") {
+        s.monitor = value;
+    } else if (name == L"framegen.method") {
+        const std::wstring l = lower(value);
+        if (l == L"motion") s.framegen_blend = false;
+        else if (l == L"blend") s.framegen_blend = true;
+        else return bad(L"motion or blend");
+    } else if (name == L"framegen.max_output_hz") {
+        if (!parse_int(value, 0, 1000, n) || (n && n < 24)) return bad(L"0 or 24 to 1000");
+        s.framegen_max_hz = int(n);
     } else if (name == L"frames.dedup") {
         if (!parse_bool(value, b)) return bad(L"1 or 0");
         s.dedup = b;
@@ -182,6 +222,29 @@ const wchar_t *scaling_name(Settings::Scaling scaling) {
     }
 }
 
+const std::vector<std::wstring> &tone_mapping_names() {
+    static const std::vector<std::wstring> names = {L"auto",      L"clip",      L"spline", L"bt.2390",
+                                                    L"bt.2446a",  L"st2094-40", L"st2094-10", L"mobius",
+                                                    L"reinhard",  L"hable",     L"gamma",  L"linear"};
+    return names;
+}
+
+const wchar_t *hdr_output_name(Settings::HdrOutput output) {
+    switch (output) {
+    case Settings::HdrOutput::Hdr: return L"hdr";
+    case Settings::HdrOutput::Sdr: return L"sdr";
+    default: return L"auto";
+    }
+}
+
+const wchar_t *vrr_setting_name(Settings::Vrr vrr) {
+    switch (vrr) {
+    case Settings::Vrr::On: return L"on";
+    case Settings::Vrr::Off: return L"off";
+    default: return L"auto";
+    }
+}
+
 const char *default_settings_text() {
     return R"(; Glasir settings. Lines starting with ; are comments.
 ; A missing file is recreated with these defaults.
@@ -213,6 +276,36 @@ hdr_peak_nits = 1000
 ; GPU time).
 scaling = mpv
 
+[hdr]
+; What is done with an HDR capture (video.mode = hdr). auto: sent to the
+; screen as HDR when Windows has HDR on for it, else tone mapped to SDR.
+; hdr: always sent as HDR. sdr: always tone mapped to SDR.
+output = auto
+; The screen's peak brightness (nits) the picture is fitted to. 0: what the
+; screen reports to Windows.
+display_peak_nits = 0
+; How highlights brighter than the screen are brought down: auto, clip,
+; spline, bt.2390, bt.2446a, st2094-40, st2094-10, mobius, reinhard, hable,
+; gamma or linear (mpv's tone mapping curves).
+tone_mapping = auto
+; 1: measure each frame's brightest point instead of trusting hdr_peak_nits
+; (a better fit for games that never reach their peak; some GPU time).
+dynamic_peak = 0
+; How bright the menu's white is in HDR (nits). 0: Windows' "SDR content
+; brightness" for the screen.
+paper_white_nits = 0
+
+[display]
+; The screen Glasir plays on: its number as Windows' display settings show it
+; (1, 2) or a part of its name. Empty: the main screen.
+monitor =
+; Variable refresh rate (G-SYNC, FreeSync, HDMI VRR) on the PC's screen.
+; auto: as Glasir finds it. on / off: if it finds it wrong.
+vrr = auto
+; The GPU mpv draws on, by a part of its name ("RTX", "Radeon"). Empty: the
+; one the screen is plugged into.
+gpu =
+
 [frames]
 ; 1: send mpv only new frames (a 30 fps game captured at 60 arrives at 30).
 ; Frame generation needs it.
@@ -230,6 +323,13 @@ dedup_keepalive_ms = 200
 enabled = 1
 ; high, or fast (about half the GPU time, a little less clean).
 quality = high
+; motion: the frame in between follows what moves (the default). blend: a
+; plain mix of the two frames (the lightest; moving things show double).
+method = motion
+; The most frames a second frame generation shows. 0: the screen's refresh
+; rate. A little under it (116 on a 120 Hz screen) keeps a VRR screen inside
+; its range.
+max_output_hz = 0
 ; While frame generation is off (F8): 1 = send mpv every frame (lowest
 ; latency), 0 = new frames only.
 all_frames_when_off = 1

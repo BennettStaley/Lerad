@@ -24,6 +24,20 @@ struct Settings {
     // How the capture is scaled up to the window (glasir_scaling.lua).
     enum class Scaling { Mpv, Fsr, Vsr, Cnn, Anime4k };
     Scaling scaling = Scaling::Mpv;
+    // [hdr]: what is done with an HDR capture (video.mode = hdr).
+    // Auto: HDR10 to the screen when Windows has HDR on for it, else tone
+    // mapped to SDR. Hdr / Sdr: always that.
+    enum class HdrOutput { Auto, Hdr, Sdr };
+    HdrOutput hdr_output = HdrOutput::Auto;
+    int display_peak_nits = 0;           // 0: what the screen reports to Windows
+    std::wstring tone_mapping = L"auto"; // mpv's --tone-mapping (tone_mapping_names())
+    bool hdr_dynamic_peak = false;       // measure each frame's peak (mpv's --hdr-compute-peak)
+    int paper_white_nits = 0;            // the menu's white in HDR; 0: Windows' SDR brightness, else 203
+    // [display]
+    enum class Vrr { Auto, On, Off };
+    Vrr vrr = Vrr::Auto;  // auto: as detected (display.h); on / off: the user knows better
+    std::wstring gpu;     // part of the GPU's name mpv renders on; empty: the screen's own
+    std::wstring monitor; // the screen Glasir plays on: its number (1, 2: Windows' own) or part of its name; empty: the primary
     // [frames]
     bool dedup = true;
     int dedup_threshold = 3;
@@ -31,6 +45,8 @@ struct Settings {
     // [framegen]
     bool framegen = true;
     bool framegen_fast = false;       // quality = fast: about half the GPU time
+    bool framegen_blend = false;      // method = blend: a plain mix of the two frames, not motion-compensated
+    int framegen_max_hz = 0;          // the most frames a second shown; 0: the screen's refresh rate
     bool all_frames_when_off = true;  // frame generation off: every frame (lowest latency)
     // [dlss5]
     enum class Dlss5 { Auto, On, Off };
@@ -62,6 +78,11 @@ bool load_settings(const std::wstring &path, Settings &s, std::wstring &error);
 
 // "mpv", "fsr", "vsr", "cnn", "anime4k": glasir.ini's and glasir_scaling.lua's names.
 const wchar_t *scaling_name(Settings::Scaling scaling);
+
+// glasir.ini's names for [hdr] tone_mapping (mpv's own, "auto" first).
+const std::vector<std::wstring> &tone_mapping_names();
+const wchar_t *hdr_output_name(Settings::HdrOutput output);  // "auto", "hdr", "sdr"
+const wchar_t *vrr_setting_name(Settings::Vrr vrr);          // "auto", "on", "off"
 
 // One setting, as "section.key=value" (the command line's --set).
 bool apply_override(Settings &s, const std::wstring &assignment, std::wstring &error);
