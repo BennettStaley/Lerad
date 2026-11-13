@@ -47,6 +47,8 @@ struct Settings {
     bool framegen_fast = false;       // quality = fast: about half the GPU time
     bool framegen_blend = false;      // method = blend: a plain mix of the two frames, not motion-compensated
     int framegen_max_hz = 0;          // the most frames a second shown; 0: the screen's refresh rate
+    int framegen_multiplier = 2;      // frames shown per game frame, at most: 2, 3 or 4
+    bool framegen_show_rates = false; // the frame rate readout in the corner (read by the menu's add-on)
     bool all_frames_when_off = true;  // frame generation off: every frame (lowest latency)
     // [dlss5]
     enum class Dlss5 { Auto, On, Off };

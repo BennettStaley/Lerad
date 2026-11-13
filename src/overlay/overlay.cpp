@@ -50,6 +50,7 @@ struct Overlay {
     bool source_hdr = false;
     bool hdr_available = true;
     bool borderless = true;
+    bool show_rates = false;  // the frame rate readout in the corner
     // Frames the menu was drawn on since it opened: mpv's presents, and the
     // real frames frame generation presents itself.
     unsigned on_mpv = 0, on_real = 0;
@@ -126,6 +127,9 @@ bool init(ID3D11Device *device) {
     wchar_t window_mode[16] = {};
     g.borderless = GetEnvironmentVariableW(L"GLASIR_WINDOW_MODE", window_mode, 16) == 0 ||
                    _wcsicmp(window_mode, L"windowed") != 0;
+    // The readout in the corner: glasir.ini's own value (the menu keeps it there).
+    if (!g.settings_path.empty())
+        g.show_rates = GetPrivateProfileIntW(L"framegen", L"show_rates", 0, g.settings_path.c_str()) != 0;
     reshade::log::message(reshade::log::level::info, "Glasir menu: ready");
     return true;
 }
@@ -215,8 +219,10 @@ void build_and_draw(ID3D11DeviceContext *context, ID3D11Texture2D *back_buffer, 
         frame.hdr_available = g.hdr_available;
         frame.borderless = g.borderless;
         frame.scale = scale;
+        frame.show_rates = &g.show_rates;
         keep = draw_menu(frame);
     }
+    if (g.show_rates) draw_rates(g.host, scale);
     const double now = now_seconds();
     if (now < g.toast_until) {
         const float alpha = float(std::clamp((g.toast_until - now) / kToastFade, 0.0, 1.0));
@@ -353,7 +359,7 @@ void on_reshade_present(reshade::api::effect_runtime *runtime) {
 
     if (runtime->is_key_pressed(kOpenKey) || (g.open && runtime->is_key_pressed(VK_ESCAPE))) set_open(!g.open);
     poll_toasts(now_seconds());
-    if (!g.open && !toast_showing()) return;
+    if (!g.open && !toast_showing() && !g.show_rates) return;
     if (g.open) runtime->block_input_next_frame();
     ComPtr<ID3D11Texture2D> back_buffer;
     if (FAILED(swapchain->GetBuffer(0, IID_PPV_ARGS(&back_buffer)))) return;
@@ -365,7 +371,7 @@ void on_reshade_present(reshade::api::effect_runtime *runtime) {
 void draw_again(ID3D11DeviceContext *context, ID3D11Texture2D *back_buffer) {
     // Built again rather than drawn again: the menu then answers at the rate
     // frames reach the screen, not at mpv's.
-    if ((!g.open && !toast_showing()) || !g.runtime || !g.imgui) return;
+    if ((!g.open && !toast_showing() && !g.show_rates) || !g.runtime || !g.imgui) return;
     build_and_draw(context, back_buffer, false);
     if (g.open) ++g.on_real;
 }

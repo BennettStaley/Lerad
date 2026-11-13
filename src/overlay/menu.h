@@ -22,7 +22,11 @@ struct MenuFrame {
     bool hdr_available = true;   // the card has an HDR mode (false: no "Switch to HDR")
     bool borderless = true;      // glasir.ini window.mode when mpv started (the menu follows its own switches)
     float scale = 1;             // 1 at 1080 lines
+    bool *show_rates = nullptr;  // the readout in the corner (glasir.ini framegen.show_rates); the menu switches it
 };
+
+// The frame rate readout in the top left corner.
+void draw_rates(const Host &host, float scale);
 
 // A toast at the top of the picture; alpha fades it out.
 void draw_toast(const std::string &text, float alpha, float scale);

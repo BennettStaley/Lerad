@@ -28,7 +28,9 @@ in [docs/FRAMEGEN-LEARNINGS.md](../../docs/FRAMEGEN-LEARNINGS.md).
 2. **`zz-glasir-framegen.addon64`**, a ReShade add-on that runs last, after the
    DLSS 5 pass. For each real frame B it shows a frame between the previous
    real frame A and B, then B half a frame later: 30 fps becomes 60, 60 becomes
-   120.
+   120. With `Multiplier=3` or `4` (an option, never the default) it shows two
+   or three frames between A and B, a third or a quarter of a frame apart:
+   30 fps becomes 90 or 120.
 
 The frame in between is **motion-compensated** (`Method=motion`): the add-on
 finds how every part of the picture moved from A to B and draws each pixel
@@ -63,10 +65,11 @@ Settings are in `ReShade.ini`, section `[GLASIR_FRAMEGEN]`:
 | `ToggleKey` | 119 | Virtual key code of the toggle (119 or 0x77 = F8). |
 | `CaptureKey` | 120 | Saves the frames around this moment (120 = F9, see Captures). |
 | `DedupWhenOff` | 0 | 1 = new frames only while frame generation is off too (glasir.ini `all_frames_when_off = 0`). |
-| `MaxOutputHz` | 0 | Highest output rate; 0 = the display's refresh rate. |
+| `MaxOutputHz` | 0 | Frames are only added while the result stays at or under this; 0 = the display's refresh rate (glasir.ini `max_output_hz`). A limit below the screen's rate is exact; the screen's own rate has 5 % of tolerance. |
+| `Multiplier` | 2 | Frames shown per source frame, at most: 2, 3 or 4 (glasir.ini `multiplier`). The most that fits is used. |
 | `ResetMs` | 100 | A longer gap between frames starts the timing over. |
 | `RequireDedupLauncher` | 1 | Only run with the link from Glasir's dedup. |
-| `Method` | motion | `motion` = motion-compensated, `blend` = 50/50 mix. |
+| `Method` | motion | `motion` = motion-compensated, `blend` = 50/50 mix (glasir.ini `method`; the menu switches it). |
 | `Quality` | high | `high`, or `fast`: fewer candidates per pixel, about half the drawing cost (glasir.ini). |
 | `DebugMarker` | 0 | Magenta square in the top-left corner of generated frames. |
 | `LogStats` | 1 | A line in `ReShade.log` every 5 s (see below). |
@@ -76,7 +79,11 @@ Settings are in `ReShade.ini`, section `[GLASIR_FRAMEGEN]`:
 
 A frame in between is made only when
 
-- twice the source rate fits the display (`MaxOutputHz`, or its refresh rate),
+- twice the source rate fits the display (`MaxOutputHz`, or its refresh
+  rate). With `Multiplier` 3 or 4 the most that fits is used (30 fps x4 and
+  60 fps x2 on a 120 Hz screen). A rate at the edge does not switch back and
+  forth: what is running gets 3 % more room, and going up again waits two
+  seconds (`MultiplierGate` in `fg_pacing.h`),
 - fewer than two presents are still queued for the screen,
 - the source is not paused (a still picture sends only keepalive repeats),
 - mpv keeps up. New frames dropped upstream right after a generated frame
@@ -91,12 +98,57 @@ The source rate comes from the link (the card's arrival times), not from
 mpv's frames: while generating, mpv runs at the add-on's pace, so only the
 card's clock can tell that the display is too slow for twice the source rate.
 
+## What the screen does to the pacing
+
+The frames are spaced by time (the hold, below): each is let go one step
+(the source interval divided by the multiplier) after the one before. What
+that looks like depends on the screen. Glasir.exe tells the add-on what it
+found (`GLASIR_DISPLAY_VRR` = on, off or unknown, `GLASIR_DISPLAY_HZ`); the
+add-on judges the result (`judge_cadence` in `fg_pacing.h`) and the menu
+says so.
+
+| Screen | Example | What happens | The menu |
+| --- | --- | --- | --- |
+| VRR, output inside the range | 30 -> 60 or 90 on 120 Hz | Each frame is shown when it is let go: even (measured with x2, see Measured) | nothing |
+| VRR, output at the refresh rate | 60 -> 120, 30 -> 120 (x4) on 120 Hz | The step equals the refresh time: a frame let go a step after the one before is shown at once or a fraction of a millisecond later. A source a little faster than half the refresh rate fills the queue, and one frame in between is left out now and then ("queue full") | "120 fps fills this 120 Hz screen: VRR has no room left" |
+| Fixed refresh, a multiple of the output | 30 -> 60 on 120 or 240 Hz | Frames land on whole refreshes. A frame let go a whole number of refreshes after the one before was done arrives just after its refresh and waits for the next: measured 5 and 3 refreshes instead of 4 and 4 (below) | "VRR is not engaging" if VRR was expected |
+| Fixed refresh, not a multiple | 60 -> 120 on 144 or 165 Hz | Uneven whatever is done (1, 1, 1, 1, 2 refreshes) | "Uneven on this screen ... Set the screen to 120 Hz, or turn VRR on" |
+
+Whether VRR really engages cannot be asked of Windows. The add-on watches
+the swap chain's refresh counter (`GetFrameStatistics`) once a second: when
+the screen is seen refreshing at its full rate for three seconds while
+clearly fewer frames are shown (45 or more a second, under 90 % of the
+rate), it is refreshing at a fixed rate - VRR is off for windows in the
+driver, the window is not focused, or Windows composes it. The log's 5 s
+line carries the reading ("seen refreshing at 240.0"), the log warns once
+when VRR was said to be on, and the menu tells the user. That a screen with
+VRR engaged reads lower (the refreshes following the frames) is how the
+counter is documented to behave, not something measured here: no focused
+VRR window was available for it (2026-11-12).
+
+Measured 2026-11-12 on an RTX 5090, a 240 Hz screen, a 1280x720 window that
+did not have the focus ("Composed: Flip" in PresentMon, so a fixed 240 Hz
+whatever the screen can do), a synthetic 30 fps source, DLSS 5 off:
+
+| Setting | Let go (CPU, from the trace) | On screen (PresentMon) |
+| --- | --- | --- |
+| 30 fps x2 | real frame 16.68 ms after the frame in between was done, sd 0.00 | 60.0 fps; 5 and 3 refreshes alternating (20.8 / 12.5 ms), sd 4.4 ms |
+| 30 fps x2, `GLASIR_FRAMEGEN_LEAD_MS=5` | 11.68 ms after | 60.0 fps; 78 % of frames 4 refreshes (16.7 ms), sd 2.7 ms |
+| 30 fps x3 | steps 11.12 and 11.11 ms, sd 0.01-0.05 | 90 fps; 3, 2, 3 refreshes (12.5 / 8.3 / 12.5 ms): 90 does not divide 240 |
+| 30 fps x4 | steps 8.34, 8.32, 8.32 ms, sd 0.13 | 119.3 fps; 71 % of frames 2 refreshes (8.3 ms), sd 2.7 ms; other runs 107-109 fps with 19-24 "queue full" in 5 s |
+| 60 fps x2 | 8.35 ms after, sd 0.01 | 98-101 fps, 94-107 "queue full" in 5 s (the composed window, as in FRAMEGEN-LEARNINGS.md) |
+
+`GLASIR_FRAMEGEN_LEAD_MS=<ms>` lets every held frame go that much earlier.
+It is a test switch for fixed-refresh screens, where it puts frames back on
+their refresh (the second row); with VRR it would make them uneven.
+
 ## Logs
 
 `ReShade.log`, every 5 s:
 
 ```
-30.0 real + 30.0 generated fps | interval 33.32 ms (source) | display 165 Hz, cap 165 Hz
+30.0 real + 90.0 generated fps (x4 of up to x4) | interval 33.33 ms (source) | display
+120.00 Hz (seen refreshing at 120.0), VRR on, cap 120 Hz
 | 0 late frames, 0 dropped upstream after a generated frame | not generated: 0 too fast,
 0 queue full, 0 source paused, 0 backing off, 0 mpv settling, 0 effects mix
 | mpv present 0.04 ms avg, 0.11 max | real frame held on the GPU 16.68 ms avg after the
@@ -105,6 +157,12 @@ avg, 0.029 max; of 151: 151 timed (0 of them let go early for the next frame, 0 
 when done), 0 without the done signal, 0 with a later frame (queue full, resize); queued in
 10.00 ms max
 ```
+
+After "interval", a source whose rate moves reads `(source, 40-57 fps,
+variable)`, and one with a steady rate in uneven steps (45 fps inside a 60 Hz
+signal) `(source, uneven steps)`. With x3 and x4 the "held" figures count
+every held frame (the later frames in between and the real one), each about
+one step.
 
 "mpv present" is how long mpv's present of the generated frame blocked. The
 real frame is presented right after it but held on the GPU, and a thread of
@@ -126,10 +184,19 @@ or `GLASIR_FRAMEGEN_PACING=present` for comparisons - the add-on sleeps on mpv's
 thread until half an interval after mpv's present and the line ends
 `real frame out late by ...` instead.
 
-In the trace (`GLASIR_FRAMEGEN_TRACE`), `real_ms` is when the real frame was let
+In the trace (`GLASIR_FRAMEGEN_TRACE`), `real_ms` is when the frame was let
 go on the CPU: the release of the hold, or (without it) the end of the sleep
-before its present; -1 when it went out with a later frame. Neither is when
-it reached the screen (PresentMon has that).
+before its present; -1 when it went out with a later frame. `frame` and `of`
+say which of the source frame's frames the line is (2 of 2 is the real frame
+of x2; with x4, lines "between" 2 and 3 of 4 come before "generated" 4 of
+4). Neither is when it reached the screen. For that the trace also has
+`#screen` lines, written by a thread that reads the swap chain's frame
+statistics every half millisecond: time, presents shown so far, the refresh
+the latest was shown on, refreshes so far, and when the latest refresh was.
+On a fixed-refresh screen the difference between two lines' refresh numbers
+is how many refreshes a frame stayed up; it matched PresentMon's
+`msBetweenDisplayChange` in the runs above. PresentMon itself runs without
+administrator rights for members of the "Performance Log Users" group.
 
 `logs\glasir.log`:
 
@@ -169,6 +236,23 @@ it reached the screen (PresentMon has that).
   That present bypasses ReShade, so the DLSS 5 add-ons still see exactly one
   frame per real frame.
 - Two frames are only mixed when ReShade's effects ran for both or for neither.
+- More than one frame in between (`Multiplier` 3, 4): `reshade_present` draws
+  the first at 1/3 or 1/4 of the way from A to B (`fg::DrawOptions::t`; the
+  shaders take any t). `finish_present` then, for each later one and last for
+  B: signals that the frame before is done, draws it (or copies B) into the
+  back buffer, queues a wait and presents. The GPU draws each while the one
+  before is on screen. The hold's thread times all of them from when the
+  first frame in between was done, a step apart; if the next source frame's
+  effects are due before the last would go, the steps shrink evenly
+  (`squeezed_step`). Each present of mpv's thread waits until the frame
+  before went out, so that thread is busy until the second to last frame is
+  let go ("queued in": 9 ms at 30 fps x3, 13.5 ms at x4). The hold's thread
+  must never call into the swap chain: with x4, reading its frame statistics
+  there waited for a lock mpv's blocked present held, while that present
+  waited for the thread's release - a one-second stall each time.
+  Each frame in between runs the whole interpolation again (the search too,
+  which does not depend on t: searching once and drawing per t would save
+  about a fifth of each added frame, and needs `fg_interp.h` split in two).
 
 The frame in between (`fg_interp.h`, shaders in `flow.hlsl`):
 
@@ -524,11 +608,14 @@ in the first eight, before step 5: 1.18 mean, 1.55 worst. All 64 pairs now
   installs it into `out\Glasir\engine`; the shaders are compiled with fxc
   into headers (`shaders.cmake` lists them). `Glasir.exe --setup` puts
   ReShade (add-on build, from reshade.me) next to mpv.exe.
-- Settings: `glasir.ini` `[framegen]` (on/off, quality, every frame while
-  off). Glasir writes them into `engine\ReShade.ini`, section
-  `[GLASIR_FRAMEGEN]`, before mpv starts; the other keys there (DebugMarker,
-  MaxOutputHz, ResetMs, ToggleKey, CaptureKey, Method, ...) can be edited by
-  hand. The add-on logs to `engine\ReShade.log`.
+- Settings: `glasir.ini` `[framegen]` (on/off, quality, method, multiplier,
+  max_output_hz, every frame while off). Glasir writes them into
+  `engine\ReShade.ini`, section `[GLASIR_FRAMEGEN]`, before mpv starts; the
+  other keys there (DebugMarker, ResetMs, ToggleKey, CaptureKey, ...) can be
+  edited by hand. The add-on logs to `engine\ReShade.log`.
+- The arithmetic of the pacing and of the menu's numbers is in `fg_pacing.h`
+  (no Direct3D), tested by `tests\test_fg_pacing.cpp` with the menu's wording
+  (`src\overlay\framegen_text.h`).
 - Without a card: `python tools\smoke_raw.py --seconds 12` runs the whole chain
   (ffmpeg test pattern -> `Glasir.exe --input-raw -` with dedup -> mpv ->
   ReShade -> the add-on); its 5 s stats lines are in ReShade.log. With
@@ -571,7 +658,11 @@ in the first eight, before step 5: 1.18 mean, 1.55 worst. All 64 pairs now
   errors where one frame hides what the other shows.
 - What no motion search can follow (lightning, sparks, a very fast attack) is
   drawn as a soft smear, not as it would look half way.
-- x2 only.
+- x2 by default; x3 and x4 are an option (`Multiplier`), checked for timing
+  and for where the frames in between sit (a moving bar at 0.24 / 0.50 / 0.76
+  and 0.34 / 0.66 of its step, from F9 captures of a synthetic source), not
+  for picture quality on game captures: `fg_eval` scores only the middle
+  frame, and thirds and quarters draw more from one of the two frames.
 - At 60 fps full screen the GPU is near its limit next to the DLSS 5 pass (see
   Measured): earlier runs backed off; on 2026-10-30 synthetic runs held 60 + 60
   with no drops.
@@ -583,7 +674,8 @@ in the first eight, before step 5: 1.18 mean, 1.55 worst. All 64 pairs now
   ms - 18.5 ms later at 30 fps, 10.2 ms at 60 (half a source frame plus the
   drawing).
 - Even pacing needs VRR (G-SYNC) with mpv in the foreground; at a fixed 165 Hz
-  frames land on whole refreshes (e.g. 6 and 12 ms at 60 fps).
+  frames land on whole refreshes (e.g. 6 and 12 ms at 60 fps). See "What the
+  screen does to the pacing".
 - The hold needs Direct3D 11.4 fences and a Direct3D 12 device on the same GPU
   (ReShade wraps it like any other; the DLSS 5 add-ons logged nothing about
   it in the tests). Without

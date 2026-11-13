@@ -48,6 +48,7 @@
 #include <reshade.hpp>
 
 #include "fg_interp.h"
+#include "fg_pacing.h"
 #include "framegen_link.h"
 #include "overlay.h"
 
@@ -55,7 +56,7 @@ using Microsoft::WRL::ComPtr;
 
 extern "C" __declspec(dllexport) const char *NAME = "Glasir Frame Generation";
 extern "C" __declspec(dllexport) const char *DESCRIPTION =
-    "Doubles the frame rate of Glasir by presenting a generated frame between each pair of real frames.";
+    "Raises the frame rate of Glasir by presenting generated frames between each pair of real frames.";
 
 namespace {
 
@@ -77,6 +78,7 @@ struct Settings {
     bool require_dedup = true;  // only run with the link from Glasir's dedup
     fg::Method method = fg::Method::motion;  // motion = motion-compensated, blend = 50/50 mix
     bool fast = false;          // Quality=fast: fewer candidates per pixel, about half the drawing cost
+    int multiplier = 2;         // frames shown per source frame, at most: 2, 3 or 4
     bool marker = false;        // magenta square on generated frames
     bool log_stats = true;      // a line in ReShade.log every 5 s
     int max_output_hz = 0;      // 0 = the display's refresh rate
@@ -85,6 +87,10 @@ struct Settings {
     int capture_key = VK_F9;    // saves the frames around this moment (Capture below)
     bool dedup_when_off = false;  // 1: mpv gets new frames only while frame generation is off too
     std::string mpv_pipe = "glasir";
+    // What Glasir.exe found out about the screen (its environment variables
+    // GLASIR_DISPLAY_VRR and GLASIR_DISPLAY_HZ), not from ReShade.ini.
+    fg::pacing::Vrr vrr = fg::pacing::Vrr::Unknown;
+    double launcher_hz = 0;  // 0: not told
 };
 
 Settings g_settings;
@@ -174,6 +180,19 @@ void load_settings() {
     else
         bad_setting("Quality", quality);
     s.reset_ms = std::clamp(s.reset_ms, 20, 1000);
+    setting("Multiplier", s.multiplier);
+    if (s.multiplier < 2 || s.multiplier > fg::pacing::kMaxMultiplier) {
+        bad_setting("Multiplier", std::to_string(s.multiplier));
+        s.multiplier = 2;
+    }
+    char env[32] = {};
+    DWORD len = GetEnvironmentVariableA("GLASIR_DISPLAY_VRR", env, sizeof(env));
+    if (len > 0 && len < sizeof(env))
+        s.vrr = _stricmp(env, "on") == 0    ? fg::pacing::Vrr::On
+                : _stricmp(env, "off") == 0 ? fg::pacing::Vrr::Off
+                                            : fg::pacing::Vrr::Unknown;
+    len = GetEnvironmentVariableA("GLASIR_DISPLAY_HZ", env, sizeof(env));
+    if (len > 0 && len < sizeof(env)) s.launcher_hz = std::max(0.0, atof(env));
     // The launcher passes the full \\.\pipe\name form to mpv; take that too.
     const std::string prefix = "\\\\.\\pipe\\";
     if (s.mpv_pipe.compare(0, prefix.size(), prefix) == 0) s.mpv_pipe.erase(0, prefix.size());
@@ -296,6 +315,13 @@ public:
 
     // New frames so far: changes when the source delivered one.
     LONG64 published() const { return view_ ? view_->published : 0; }
+
+    // When new frame number n (1 = the first) arrived, in seconds; only the
+    // last kKept are there (the writer may be filling the oldest slot).
+    static constexpr int kKept = GlasirFrameGenLink::kStamps - 1;
+    double arrived(LONG64 n) const {
+        return view_ ? double(view_->stamps[(n - 1) % GlasirFrameGenLink::kStamps]) * qpc_period() : 0;
+    }
 
     // Seconds since the source last delivered a new frame.
     double since_last(double now) const {
@@ -447,11 +473,19 @@ public:
         return true;
     }
 
-    // The frame drawn between the last real frame captured and the one now.
-    void between(ID3D11DeviceContext *ctx, ID3D11Texture2D *drawn) {
-        if (!active_ || reals_ == 0) return;
+    // A frame drawn between the last two real frames: the first of them
+    // (part 1) comes before its later real frame is captured, the others (x3,
+    // x4) after it. With one frame in between the name is as it always was
+    // (the eval tools read it); with more, _1, _2, _3 are added.
+    void between(ID3D11DeviceContext *ctx, ID3D11Texture2D *drawn, int part = 1, int parts = 1) {
+        if (!active_ && wait_ < 0) return;
+        const int earlier = part == 1 ? reals_ : reals_ - 1;
+        if (earlier < 1 || (part == 1 && !active_)) return;
         char name[48];
-        snprintf(name, sizeof(name), "between_f%02d_f%02d", reals_, reals_ + 1);
+        if (parts == 1)
+            snprintf(name, sizeof(name), "between_f%02d_f%02d", earlier, earlier + 1);
+        else
+            snprintf(name, sizeof(name), "between_f%02d_f%02d_%d", earlier, earlier + 1, part);
         add(ctx, drawn, name);
     }
 
@@ -696,6 +730,16 @@ int display_hz(IDXGISwapChain *swapchain) {
     return mode.dmDisplayFrequency > 1 ? static_cast<int>(mode.dmDisplayFrequency) : 0;
 }
 
+// The screen's refreshes so far and when the latest was, from the swap
+// chain's frame statistics. False when it cannot say.
+bool refresh_counter(IDXGISwapChain *swapchain, UINT &count, double &at) {
+    DXGI_FRAME_STATISTICS stats{};
+    if (FAILED(swapchain->GetFrameStatistics(&stats)) || stats.SyncQPCTime.QuadPart == 0) return false;
+    count = stats.SyncRefreshCount;
+    at = double(stats.SyncQPCTime.QuadPart) * qpc_period();
+    return true;
+}
+
 // Presents still queued for the screen, or -1 when the swap chain cannot say:
 // the call fails, or succeeds with the statistics left at zero (mpv's own
 // d3d11 code has seen that), or gives a count no queue could hold.
@@ -721,7 +765,8 @@ void trace_open() {
     const DWORD len = GetEnvironmentVariableA("GLASIR_FRAMEGEN_TRACE", path, sizeof(path));
     if (len > 0 && len < sizeof(path) && fopen_s(&g_trace, path, "w") == 0)
         fprintf(g_trace,
-                "time_s,dt_ms,interval_ms,source_interval_ms,queued,event,source_age_ms,effects_ms,drawn_ms,real_ms\n");
+                "time_s,dt_ms,interval_ms,source_interval_ms,queued,event,source_age_ms,effects_ms,drawn_ms,real_ms,"
+                "frame,of\n");
 }
 
 // One line. The hold thread writes the lines of held frames (once they went
@@ -733,24 +778,92 @@ struct TraceLine {
     double source_age = -1;  // since the source delivered its latest frame, -1 without the link
     double effects = -1;     // from mpv's present to reshade_present
     double drawn = -1;       // when the frame in between was done on the GPU, after now
-    double real = -1;        // when the real frame went out, after now
+    double real = -1;        // when this frame went out, after now
+    int frame = 2, of = 2;   // which of the frames shown for this source frame it is (2 of 2 = the real one)
 };
 
 void write_trace(const TraceLine &l) {
     const auto ms = [](double s) { return s < 0 ? -1.0 : s * 1000.0; };
     if (g_trace)
-        fprintf(g_trace, "%.6f,%.3f,%.3f,%.3f,%d,%s,%.3f,%.3f,%.3f,%.3f\n", l.now, l.dt * 1000.0,
+        fprintf(g_trace, "%.6f,%.3f,%.3f,%.3f,%d,%s,%.3f,%.3f,%.3f,%.3f,%d,%d\n", l.now, l.dt * 1000.0,
                 l.interval * 1000.0, l.source_interval * 1000.0, l.queued, l.event, ms(l.source_age),
-                ms(l.effects), ms(l.drawn), ms(l.real));
+                ms(l.effects), ms(l.drawn), ms(l.real), l.frame, l.of);
 }
+
+// With the trace on: which refresh of the screen each present was shown on,
+// as the swap chain's frame statistics report it. A thread of its own reads
+// them every half millisecond (they only ever give the latest present) and
+// writes a line when another present has reached the screen:
+//   #screen,<time_s>,<presents shown>,<the refresh the latest was shown on>,
+//           <refreshes so far>,<when the latest refresh was, s>
+// From these a test can tell how many refreshes each frame stayed up without
+// PresentMon (which needs administrator rights).
+class ScreenTrace {
+public:
+    void start(IDXGISwapChain *swapchain) {
+        if (thread_ || !g_trace) return;
+        if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, reinterpret_cast<LPCWSTR>(&ScreenTrace::run),
+                                &module_))
+            return;
+        swapchain_ = swapchain;
+        stopping_ = false;
+        thread_ = CreateThread(nullptr, 0, run, this, 0, nullptr);
+        if (!thread_) {
+            FreeLibrary(module_);
+            swapchain_.Reset();
+        }
+    }
+    void stop() {
+        if (!thread_) return;
+        stopping_ = true;
+        WaitForSingleObject(thread_, 2000);
+        CloseHandle(thread_);
+        thread_ = nullptr;
+        swapchain_.Reset();
+    }
+
+private:
+    static DWORD WINAPI run(void *self) {
+        auto *trace = static_cast<ScreenTrace *>(self);
+        const HMODULE module = trace->module_;
+        HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+        UINT last = 0;
+        while (!trace->stopping_) {
+            DXGI_FRAME_STATISTICS stats{};
+            if (SUCCEEDED(trace->swapchain_->GetFrameStatistics(&stats)) && stats.PresentCount != last) {
+                last = stats.PresentCount;
+                fprintf(g_trace, "#screen,%.6f,%u,%u,%u,%.6f\n", qpc_seconds(), stats.PresentCount,
+                        stats.PresentRefreshCount, stats.SyncRefreshCount,
+                        double(stats.SyncQPCTime.QuadPart) * qpc_period());
+            }
+            LARGE_INTEGER due;
+            due.QuadPart = -5000;  // half a millisecond
+            if (timer && SetWaitableTimerEx(timer, &due, 0, nullptr, nullptr, nullptr, 0))
+                WaitForSingleObject(timer, 10);
+            else
+                Sleep(1);
+        }
+        if (timer) CloseHandle(timer);
+        FreeLibraryAndExitThread(module, 0);
+    }
+
+    ComPtr<IDXGISwapChain> swapchain_;
+    HANDLE thread_ = nullptr;
+    HMODULE module_ = nullptr;
+    std::atomic<bool> stopping_{false};
+};
 
 // ---- Holding the real frame on the GPU ----------------------------------------
 
-// A held real frame: its fence value, when to let it go, and its trace line.
+// A held frame: its fence value, when to let it go, and its trace line. A
+// source frame shown as x2 has one (the real frame); as x3 or x4 two or three
+// (the later frames in between, then the real frame), let go one step apart.
 struct HoldJob {
     uint64_t n = 0;
-    double half = 0;    // this long after the frame in between is done
-    double latest = 0;  // but no later than this
+    int index = 1, count = 1;  // which of the source frame's held frames this is, of how many
+    double step = 0;    // index steps after the first frame in between is done
+    double lead = 0;    // less this (GLASIR_FRAMEGEN_LEAD_MS, for experiments)
+    double latest = 0;  // but all of them out no later than this
     TraceLine line;
 };
 
@@ -761,6 +874,11 @@ struct HoldJob {
 // present of the real frame, and goes on. This class's thread sees drawn_
 // reach the frame, sleeps until half an interval later and moves release_ on;
 // the GPU continues behind it and the real frame is shown.
+//
+// With more than one frame in between (x3, x4) the later ones are queued the
+// same way before the real frame, each behind its own wait: drawn (the GPU
+// does that while the frame before is held), wait, present. The thread times
+// them all from when the first frame in between was done, a step apart.
 //
 // D3D11 cannot move a fence from the CPU, so release_ is a Direct3D 12 fence
 // on the same GPU, opened in D3D11. Every wait queued must be released, or
@@ -794,6 +912,7 @@ public:
     // whose release the thread timed, for late_sum.
     struct Stats {
         unsigned frames = 0, drawn = 0, early = 0, overdue = 0, not_drawn = 0, at_once = 0, timed = 0;
+        unsigned firsts = 0;  // of drawn: the first held frame of its source frame (drawn_sum is theirs)
         double drawn_sum = 0, held_sum = 0, late_sum = 0, late_max = 0;
     };
     Stats take_stats() {
@@ -834,6 +953,9 @@ private:
     int first_ = 0, count_ = 0;
     uint64_t released_ = 0;
     Stats stats_;
+    // The thread's own: the source frame whose held frames it is timing.
+    double base_ = 0, step_ = 0;  // when its first frame in between was done; the step in use
+    bool base_known_ = false;
 };
 
 bool Hold::start(ID3D11Device *device, ID3D11DeviceContext *context, std::string &error) {
@@ -1001,7 +1123,17 @@ void Hold::loop() {
         const UINT64 completed = drawn_->GetCompletedValue();
         const bool drawn = completed >= job.n && completed != UINT64_MAX;
         const double drawn_at = qpc_seconds();
-        const double target = drawn && !stopping_ ? std::min(drawn_at + job.half, job.latest) : drawn_at;
+        // The first held frame of a source frame sets the times of all of
+        // them: a step apart from when the first frame in between was done,
+        // or less when the next source frame is due before that. For the
+        // later ones "drawn" only means the one before went out.
+        if (job.index == 1) {
+            base_known_ = drawn;
+            base_ = drawn_at;
+            step_ = fg::pacing::squeezed_step(job.step, drawn_at, job.latest, job.count);
+        }
+        const bool timed = drawn && base_known_ && !stopping_;
+        const double target = timed ? std::max(base_ + step_ * job.index - job.lead, drawn_at) : drawn_at;
         if (!released(job.n)) sleeper.until(target);
         // Let go meanwhile with a later frame (queue full, a resize): not timed
         // here. Otherwise let go now - also when stopping, in case stop()'s
@@ -1018,9 +1150,12 @@ void Hold::loop() {
                 ++stats_.not_drawn;
             } else {
                 ++stats_.drawn;
-                stats_.drawn_sum += drawn_at - job.line.now;
+                if (job.index == 1) {
+                    ++stats_.firsts;
+                    stats_.drawn_sum += drawn_at - job.line.now;
+                }
                 stats_.held_sum += out_at - drawn_at;
-                if (drawn_at + job.half > job.latest) ++(job.latest > drawn_at ? stats_.early : stats_.overdue);
+                if (step_ < job.step) ++(step_ > 0 ? stats_.early : stats_.overdue);
             }
             if (!gone && out) {
                 ++stats_.timed;
@@ -1174,12 +1309,35 @@ private:
 // reshade_present ReShade holds its own lock and the device's multithread
 // lock, so a sleep there would stall every other thread using the device.
 //
+// More than one frame in between (Multiplier=3 or 4, never the default): the
+// first is drawn in reshade_present at a third or a quarter of the way from A
+// to B and shown by mpv's present; finish_present draws each later one and
+// presents it, then B, a third or a quarter of the source interval apart.
+//
+// How they are spaced depends on the screen (fg_pacing.h has the arithmetic):
+//   - VRR on, or not known: the hold above. Inside the VRR range the screen
+//     shows each frame when it is let go. At the top of the range (60 -> 120
+//     on a 120 Hz screen) the step equals the refresh time, so a frame let go
+//     a step after the one before is still shown at once or within a
+//     fraction of a millisecond; over it, frames queue up and the queue rule
+//     below leaves one out now and then.
+//   - A screen refreshing at a fixed rate (VRR off, not engaging, or the
+//     window composed by Windows): the same hold; each frame is then shown
+//     on the first refresh after it was let go. "Done" comes just after a
+//     refresh, so a step of whole refreshes later is just after the one
+//     meant, and the frame waits one more: measured in a composed window on
+//     240 Hz, 30 -> 60 stayed up 5 and 3 refreshes, not 4 and 4. status()
+//     reports a screen seen refreshing at its fixed rate, and the menu says
+//     so. GLASIR_FRAMEGEN_LEAD_MS=<ms> lets held frames go that much earlier,
+//     for experiments on such screens (docs/FRAMEGEN-LEARNINGS.md).
+//
 // When it generates. The interval is the source's: with the link, the mean
 // time between new frames from the card, pauses left out; without it, the
 // median between mpv's frames (which, while generating, follow this add-on's
 // own pace - so only the link can tell that the display is too slow for twice
 // the source rate). A frame in between is only made when
-//   - twice the source rate fits the display,
+//   - twice the source rate fits the display (and of x3 and x4 the most that
+//     fits is used: MultiplierGate),
 //   - fewer than two presents are still queued (else it would only add delay),
 //   - the source is not paused (a still picture: only keepalive repeats),
 //   - mpv is keeping up (watch_drops): drops caused while generating pause
@@ -1193,23 +1351,9 @@ public:
     bool ready() const { return !broken_ && source_ok(); }
     void set_enabled(bool on);
     void set_fast(bool fast);
-    glasir::overlay::FramegenStatus status() const {
-        glasir::overlay::FramegenStatus s;
-        const double now = qpc_seconds();
-        if (now < paused_until_) {
-            s.kind = s.Paused;
-            s.seconds_left = paused_until_ - now;
-        } else if (interval_ > 0 && max_hz_ > 0 && 2.0 / interval_ > max_hz_ * 1.05) {
-            s.kind = s.TooFast;
-            s.display_hz = max_hz_;
-        }
-        return s;
-    }
-    void rates(double &source, double &real, double &generated) const {
-        source = source_interval_ > 0 ? 1.0 / source_interval_ : 0;
-        real = real_fps_;
-        generated = generated_fps_;
-    }
+    void set_blend(bool blend);
+    void set_multiplier(int multiplier);
+    glasir::FramegenStatus status() const;
     void on_effects_finished(reshade::api::effect_runtime *runtime) {
         if (mpv_swapchain_ && runtime->get_native() != mpv_swapchain_) return;  // another runtime's effects
         effects_ran_ = true;
@@ -1232,6 +1376,7 @@ public:
 
     void release() {
         capture_.reset(false);
+        screen_trace_.stop();
         for (auto &t : frames_) t.Reset();
         for (auto &v : views_) v.Reset();
         interp_.release();
@@ -1252,7 +1397,17 @@ public:
 private:
     bool init(ID3D11Device *device);
     bool ensure_frames(const D3D11_TEXTURE2D_DESC &bb);
-    bool draw_between(ID3D11Texture2D *back_buffer, int a, int b);
+    bool draw_between(ID3D11Texture2D *back_buffer, int a, int b, float t);
+    void note_source();
+    void watch_refresh(IDXGISwapChain *swapchain, double now);
+    // The most frames a second that may be shown: the user's limit when it
+    // is below the screen's rate, else the screen's (60 when unknown).
+    fg::pacing::Limit output_limit() const {
+        const double screen = display_hz_ > 0 ? display_hz_ : 60.0;
+        if (g_settings.max_output_hz > 0 && g_settings.max_output_hz < screen)
+            return {double(g_settings.max_output_hz), true};
+        return {screen, false};
+    }
     void reset_history() {
         prev_ = -1;
         dt_interval_ = 0;
@@ -1333,11 +1488,13 @@ private:
     double recent_[kRecent] = {};
     int intervals_seen_ = 0;
 
-    // A real frame still to present after the frame in between.
+    // A real frame still to present after the frame in between (and, with
+    // x3 or x4, the later frames in between before it).
     bool pending_ = false;
-    int pending_slot_ = 0;
-    double pending_target_ = 0, pending_since_ = 0;
-    double pending_now_ = 0, pending_dt_ = 0, pending_half_ = 0, pending_latest_ = 0;
+    int pending_slot_ = 0, pending_prev_slot_ = 0;
+    int pending_count_ = 2;  // frames shown for this source frame, the real one included
+    double pending_since_ = 0;
+    double pending_now_ = 0, pending_dt_ = 0, pending_step_ = 0, pending_latest_ = 0;
     int pending_queued_ = -1;
     IDXGISwapChain *pending_swapchain_ = nullptr;
     bool generated_last_ = false;
@@ -1355,14 +1512,31 @@ private:
     LONG64 last_dropped_ = -1;
     double drop_times_[2] = {-1e9, -1e9};
     double paused_until_ = 0, backoff_ = 5.0, settle_until_ = 0;
-    int max_hz_ = 0;  // the most the display shows, as last read (for the menu)
-
     bool broken_ = false;
-    double real_fps_ = 0, generated_fps_ = 0;  // over the last stats window, for the menu
-    int hz_ = 0;
+    int hz_ = 0;             // the screen's refresh rate as Windows gives it (whole)
+    double display_hz_ = 0;  // with its fraction when Glasir.exe told it (119.88), else hz_
     double next_hz_try_ = 0;
+    double lead_ = 0;  // GLASIR_FRAMEGEN_LEAD_MS: held frames are let go this much earlier
+
+    // What the menu shows (status()): over the last second, not the 5 s log's
+    // window.
+    fg::pacing::SourceCadence cadence_;  // the source's new frames, by the card's clock
+    LONG64 cadence_seen_ = 0;            // the link's new-frame count already in it
+    fg::pacing::RateWindow shown_real_, shown_generated_, queue_skips_, mix_skips_, late_, dropped_;
+    fg::pacing::MultiplierGate gate_;
+    glasir::FramegenStatus::Reason reason_ = glasir::FramegenStatus::Reason::Starting;  // the latest frame's
+
+    // The screen's refreshes as the swap chain counts them, sampled once a
+    // second: at its fixed rate whatever is presented means VRR is not
+    // engaging.
+    UINT refresh_count_ = 0;
+    double refresh_at_ = 0, seen_hz_ = 0;
+    fg::pacing::Seen seen_ = fg::pacing::Seen::Unknown;
+    int seen_fixed_ = 0;  // samples in a row that read "fixed"
+    bool seen_logged_ = false;
     Sleeper sleeper_;
     Capture capture_;
+    ScreenTrace screen_trace_;  // GLASIR_FRAMEGEN_TRACE only
     double capture_after_ = -1;  // GLASIR_FRAMEGEN_CAPTURE_AFTER: when, 0 = none, -1 = not read yet
     double toggle_after_ = -1;   // GLASIR_FRAMEGEN_TOGGLE_AFTER: the same
 
@@ -1385,6 +1559,15 @@ bool FrameGen::init(ID3D11Device *device) {
     hold_wanted_ = !(len > 0 && len < sizeof(pacing) && _stricmp(pacing, "present") == 0);
     if (!hold_wanted_)
         log_line(reshade::log::level::info, "GLASIR_FRAMEGEN_PACING=present: the real frame is timed from mpv's present");
+    char lead[16] = {};
+    const DWORD lead_len = GetEnvironmentVariableA("GLASIR_FRAMEGEN_LEAD_MS", lead, sizeof(lead));
+    if (lead_len > 0 && lead_len < sizeof(lead)) lead_ = std::clamp(atof(lead), 0.0, 20.0) / 1000.0;
+    if (lead_ > 0)
+        log_line(reshade::log::level::info, "GLASIR_FRAMEGEN_LEAD_MS: held frames are let go %.2f ms early",
+                 lead_ * 1000.0);
+    log_line(reshade::log::level::info, "the screen, as Glasir found it: VRR %s, %.3f Hz",
+             g_settings.vrr == fg::pacing::Vrr::On ? "on" : g_settings.vrr == fg::pacing::Vrr::Off ? "off" : "unknown",
+             g_settings.launcher_hz);
     log_line(reshade::log::level::info, "ready: feature level 0x%X, %s, toggle key %d%s", device->GetFeatureLevel(),
              g_settings.enabled ? "on" : "off", g_settings.toggle_key,
              g_settings.require_dedup ? ", waiting for the link from Glasir's dedup" : "");
@@ -1451,15 +1634,16 @@ bool FrameGen::ensure_frames(const D3D11_TEXTURE2D_DESC &bb) {
     return true;
 }
 
-// Draws the frame in between frames_[a] and frames_[b] into the back buffer.
-bool FrameGen::draw_between(ID3D11Texture2D *back_buffer, int a, int b) {
+// Draws the frame at t (0 = a, 1 = b) between frames_[a] and frames_[b] into
+// the back buffer.
+bool FrameGen::draw_between(ID3D11Texture2D *back_buffer, int a, int b, float t) {
     ComPtr<ID3D11RenderTargetView> rtv;
     HRESULT hr = device_->CreateRenderTargetView(back_buffer, nullptr, &rtv);
     if (FAILED(hr)) return fail("CreateRenderTargetView", hr), false;
 
     fg::DrawOptions o;
     o.method = g_settings.method;
-    o.t = 0.5f;
+    o.t = t;
     o.marker = g_settings.marker;
     o.marker_level = 0.75f;                                                // sRGB-encoded
     if (pq()) o.marker_level = 0.5f;                                       // PQ, about 90 nits
@@ -1506,7 +1690,113 @@ void FrameGen::set_enabled(bool on) {
     paused_until_ = settle_until_ = 0;
     backoff_ = 5.0;
     drop_times_[0] = drop_times_[1] = -1e9;  // a drop from before does not pair with one after
+    gate_.reset();
+    reason_ = glasir::FramegenStatus::Reason::Starting;
     log_line(reshade::log::level::info, "toggled %s", g_settings.enabled ? "on" : "off");
+}
+
+// Method=blend: a 50/50 mix (by how far between, with x3 and x4) instead of
+// following the motion. Read at every draw, so it changes at once.
+void FrameGen::set_blend(bool blend) {
+    g_settings.method = blend ? fg::Method::blend : fg::Method::motion;
+    reshade::set_config_value(nullptr, kSection, "Method", blend ? "blend" : "motion");
+    log_line(reshade::log::level::info, "method %s", blend ? "blend" : "motion");
+}
+
+// Multiplier: frames shown per source frame, at most. Used from the next
+// frame on.
+void FrameGen::set_multiplier(int multiplier) {
+    g_settings.multiplier = std::clamp(multiplier, 2, fg::pacing::kMaxMultiplier);
+    reshade::set_config_value(nullptr, kSection, "Multiplier", g_settings.multiplier);
+    gate_.reset();
+    log_line(reshade::log::level::info, "multiplier up to x%d", g_settings.multiplier);
+}
+
+// The source's new frames since the last look, into cadence_ (all of them:
+// several may have come since mpv's last present, or been dropped before it).
+void FrameGen::note_source() {
+    const LONG64 published = g_link.published();
+    for (LONG64 n = std::max(cadence_seen_, published - Link::kKept) + 1; n <= published; ++n)
+        cadence_.add(g_link.arrived(n));
+    cadence_seen_ = published;
+}
+
+// Once a second: how many times a second the screen was seen refreshing.
+void FrameGen::watch_refresh(IDXGISwapChain *swapchain, double now) {
+    UINT count = 0;
+    double at = 0;
+    if (!refresh_counter(swapchain, count, at)) return;
+    if (refresh_at_ > 0 && at > refresh_at_ + 0.5 && at < refresh_at_ + 3.0) {
+        seen_hz_ = double(count - refresh_count_) / (at - refresh_at_);
+        const double shown = shown_real_.rate(now) + shown_generated_.rate(now);
+        const fg::pacing::Seen seen = fg::pacing::judge_refresh(seen_hz_, display_hz_, shown);
+        // "Fixed" only after three seconds of it: one sample can straddle a
+        // change of rate.
+        seen_fixed_ = seen == fg::pacing::Seen::Fixed ? seen_fixed_ + 1 : 0;
+        seen_ = seen == fg::pacing::Seen::Fixed && seen_fixed_ < 3 ? fg::pacing::Seen::Unknown : seen;
+        if (seen_ == fg::pacing::Seen::Fixed && g_settings.vrr == fg::pacing::Vrr::On && !seen_logged_) {
+            seen_logged_ = true;
+            log_line(reshade::log::level::warning,
+                     "VRR is on for this screen, but it keeps refreshing at %.1f Hz while %.1f frames a second are "
+                     "shown: VRR is not engaging (not on for windows in the driver, the window not focused, or "
+                     "composed by Windows)",
+                     seen_hz_, shown);
+        }
+        if (seen_ == fg::pacing::Seen::Following) seen_logged_ = false;
+    }
+    refresh_count_ = count;
+    refresh_at_ = at;
+}
+
+glasir::FramegenStatus FrameGen::status() const {
+    using Status = glasir::FramegenStatus;
+    Status s;
+    const double now = qpc_seconds();
+    s.enabled = g_settings.enabled && !broken_ && source_ok();
+    const fg::pacing::SourceCadence::Summary c = cadence_.summary(now);
+    s.source_fps = c.fps;
+    s.source_low = c.low;
+    s.source_high = c.high;
+    s.source_variable = c.variable;
+    s.source_uneven = c.uneven;
+    s.real_fps = shown_real_.rate(now);
+    s.generated_fps = shown_generated_.rate(now);
+    s.display_hz = display_hz_;
+    s.cap_hz = output_limit().exact ? g_settings.max_output_hz : 0;
+    s.vrr = g_settings.vrr;
+    s.seen = seen_;
+    s.seen_hz = seen_hz_;
+    s.wanted = g_settings.multiplier;
+    if (!s.enabled) return s;
+
+    // What the latest frame decided, when that is a state that lasts; else
+    // what got in the way now and then over the last second - if the frames
+    // shown really fall short of what was meant.
+    s.reason = reason_;
+    const bool none = reason_ != Status::Reason::None && reason_ != Status::Reason::FewerFit;
+    s.multiplier = none ? 1 : gate_.current();
+    if (reason_ == Status::Reason::BackingOff) s.seconds_left = std::max(0.0, paused_until_ - now);
+    if (!none && s.source_fps > 0 && s.real_fps + s.generated_fps < 0.95 * s.multiplier * s.source_fps) {
+        const int queue = queue_skips_.count(now), dropped = dropped_.count(now), late = late_.count(now);
+        if (mix_skips_.count(now) > 0) {
+            s.reason = Status::Reason::EffectsMix;
+        } else if (queue > 0 && queue >= dropped) {
+            s.reason = Status::Reason::QueueFull;
+            s.reason_count = queue;
+        } else if (dropped > 0) {
+            s.reason = Status::Reason::Drops;
+            s.reason_count = dropped;
+        } else if (late > 0) {
+            s.reason = Status::Reason::Late;
+            s.reason_count = late;
+        }
+    }
+    if (s.multiplier > 1 && s.source_fps > 0) {
+        const fg::pacing::Verdict v = fg::pacing::judge_cadence(s.multiplier * s.source_fps, display_hz_, s.vrr);
+        s.cadence = v.cadence;
+        s.better_hz = v.better_hz;
+    }
+    return s;
 }
 
 // Quality=fast: the 2x2 cells around each pixel, compared on the pixel alone.
@@ -1536,6 +1826,7 @@ void FrameGen::watch_drops(double now, bool stalled) {
     const LONG64 dropped = g_link.dropped();
     const LONG64 fresh = last_dropped_ < 0 ? 0 : dropped - last_dropped_;
     last_dropped_ = dropped;
+    for (LONG64 i = 0; i < std::min<LONG64>(fresh, 64); ++i) dropped_.add(now);
     if (fresh <= 0) {
         if (generated_last_ && now - std::max(paused_until_, drop_times_[1]) > 30.0) backoff_ = 5.0;
         return;
@@ -1567,6 +1858,7 @@ void FrameGen::on_reshade_present(reshade::api::effect_runtime *runtime) {
     if (!device_ && !init(device)) return;
     if (device != device_.Get()) return;  // not the device we set up on: not mpv's frame
     mpv_swapchain_ = runtime->get_native();
+    screen_trace_.start(swapchain);
 
     // Whatever the effects did, it was for this frame only.
     const bool neural = effects_ran_;
@@ -1585,6 +1877,18 @@ void FrameGen::on_reshade_present(reshade::api::effect_runtime *runtime) {
         if (g_link.linked()) settle_until_ = now + 2.0;
     }
     toggle(runtime);
+    // For the menu's numbers, whether or not frames are being added.
+    note_source();
+    shown_real_.add(now);
+    if (now >= next_hz_try_) {
+        // Every second: the window may move to another screen or the mode
+        // change. A failed read keeps the last rate. Glasir.exe's figure has
+        // the fraction (119.88); it is used while it agrees with Windows'.
+        if (const int hz = display_hz(swapchain)) hz_ = hz;
+        display_hz_ = hz_ > 0 && std::fabs(g_settings.launcher_hz - hz_) < 1.0 ? g_settings.launcher_hz : hz_;
+        watch_refresh(swapchain, now);
+        next_hz_try_ = now + 1.0;
+    }
     // While frame generation is off, mpv gets every frame as without --dedup:
     // nothing gains from new frames only then (DedupWhenOff=1 keeps them).
     // So too while the in-game menu is open on a still picture (a quarter of
@@ -1601,6 +1905,7 @@ void FrameGen::on_reshade_present(reshade::api::effect_runtime *runtime) {
     if (broken_ || !g_settings.enabled || !source_ok()) {
         last_real_ = now;
         generated_last_ = false;
+        if (g_link.linked()) last_dropped_ = g_link.dropped();
         if (capture_.active()) capture_.reset();  // its frames would not be in a row
         // No frames to save: the bug report comes without them.
         if (capture_key && !capture_.busy()) mpv_bug_report(L"", g_settings.enabled ? "unavailable" : "off");
@@ -1653,51 +1958,64 @@ void FrameGen::on_reshade_present(reshade::api::effect_runtime *runtime) {
         return;
     }
 
-    if (now >= next_hz_try_) {
-        // Every second: the window may move to another screen or the mode
-        // change. A failed read keeps the last rate.
-        if (const int hz = display_hz(swapchain)) hz_ = hz;
-        next_hz_try_ = now + 1.0;
-    }
-    const int max_hz = g_settings.max_output_hz > 0 ? g_settings.max_output_hz : (hz_ > 0 ? hz_ : 60);
-    max_hz_ = max_hz;
-
     const int cur = prev_ == 0 ? 1 : 0;
     context_->CopyResource(frames_[cur].Get(), back_buffer.Get());
     neural_[cur] = neural;
     ++real_;
-    if (prev_ >= 0 && interval_ > 0 && dt > 1.5 * interval_) ++late_frames_;  // still generated
+    if (prev_ >= 0 && interval_ > 0 && dt > 1.5 * interval_) {
+        ++late_frames_;  // still generated
+        late_.add(now);
+    }
 
+    using Reason = glasir::FramegenStatus::Reason;
     int queued = -1;
     bool generate = prev_ >= 0 && interval_ > 0;
-    if (generate && 2.0 / interval_ > max_hz * 1.05) {
-        generate = false;  // the display cannot show twice this rate
+    Reason why = generate ? Reason::None : Reason::Starting;
+    // How many frames to show for this source frame: the most that fits the
+    // screen, up to the setting.
+    const int count = interval_ > 0 ? gate_.choose(now, 1.0 / interval_, g_settings.multiplier, output_limit(),
+                                                   g_settings.vrr, display_hz_)
+                                    : 1;
+    if (generate && count < 2) {
+        generate = false;  // the display cannot show even twice this rate
         ++skipped_fast_;
+        why = Reason::TooFast;
     }
     if (generate && g_link.linked() && g_link.since_last(now) > std::max(reset, 3.0 * interval_)) {
         generate = false;  // the source is paused: this is a keepalive repeat
         ++skipped_paused_;
+        why = Reason::SourcePaused;
     }
     if (generate && now < paused_until_) {
         generate = false;
         ++skipped_backoff_;
+        why = Reason::BackingOff;
     }
     if (generate && now < settle_until_) {
         generate = false;  // mpv dropped frames on its own a moment ago
         ++skipped_settle_;
+        why = Reason::Settling;
     }
+    if (generate && count < g_settings.multiplier) why = Reason::FewerFit;
+    reason_ = why;
+    // These two come and go frame by frame: counted, for the menu to name
+    // when the frames shown fall short.
     if (generate && neural_[prev_] != neural) {
         generate = false;  // the effects ran for one frame and not the other
         ++skipped_mixed_;
+        mix_skips_.add(now);
     }
     if (generate && (queued = queued_presents(swapchain)) >= 2) {
         generate = false;  // the screen is behind: another present would only wait
         ++skipped_queue_;
+        queue_skips_.add(now);
     }
 
-    if (generate && draw_between(back_buffer.Get(), prev_, cur)) {
+    if (generate && draw_between(back_buffer.Get(), prev_, cur, 1.0f / count)) {
         pending_ = true;
         pending_slot_ = cur;
+        pending_prev_slot_ = prev_;
+        pending_count_ = count;
         // The real frame goes out half an interval after the frame in between
         // (never more than 40 ms: below 12.5 fps there is little left to
         // smooth): held, half an interval after it was done; else half an
@@ -1709,10 +2027,11 @@ void FrameGen::on_reshade_present(reshade::api::effect_runtime *runtime) {
         // about as long from there to mpv's present as new frames have lately
         // (this present may be an OSD redraw that carries none). When that
         // cannot be told, no later than the old time.
+        // With x3 and x4 the same holds for a third or a quarter: the
+        // frames go out that step apart, the real one last.
         constexpr double kNextEffectsMargin = 0.0005;
-        pending_half_ = std::min(interval_ * 0.5, 0.04);
-        pending_target_ = now + pending_half_;
-        pending_latest_ = pending_target_;
+        pending_step_ = std::min(interval_, 0.08) / count;
+        pending_latest_ = now + pending_step_ * (count - 1);
         const double soonest = g_link.shortest_recent_gap(reset);
         if (soonest > 0 && source_age_ >= 0 && arrival_to_present_ >= 0)
             pending_latest_ = now - source_age_ + soonest + arrival_to_present_ - kNextEffectsMargin;
@@ -1720,7 +2039,10 @@ void FrameGen::on_reshade_present(reshade::api::effect_runtime *runtime) {
         pending_dt_ = dt;
         pending_swapchain_ = swapchain;
         pending_since_ = qpc_seconds();
-        ++generated_;
+        generated_ += count - 1;
+        // Each at about the time it is shown, so the menu's rate over the
+        // last second comes out even.
+        for (int i = 1; i < count; ++i) shown_generated_.add(now + pending_step_ * (i - 1));
     }
     generated_last_ = pending_;
     // GLASIR_FRAMEGEN_CAPTURE_AFTER=<seconds>: a capture that many seconds after
@@ -1738,7 +2060,7 @@ void FrameGen::on_reshade_present(reshade::api::effect_runtime *runtime) {
             if (!timed) mpv_bug_report(L"", "failed");
         }
     }
-    if (pending_) capture_.between(context_.Get(), back_buffer.Get());  // it holds the frame in between now
+    if (pending_) capture_.between(context_.Get(), back_buffer.Get(), 1, pending_count_ - 1);  // it holds the first frame in between now
     capture_.real(context_.Get(), frames_[cur].Get());
     if (pending_)
         pending_queued_ = queued;  // traced once the real frame went out
@@ -1781,36 +2103,60 @@ void FrameGen::on_finish_present(reshade::api::swapchain *api_swapchain) {
             log_line(reshade::log::level::warning,
                      "the real frame cannot be held on the GPU (%s); it is timed from mpv's present", error.c_str());
     }
-    // Sync interval 1, like mpv: a 0 could drop a frame in between still
-    // queued, and more than 1 would hold the real frame longer than its half.
-    if (hold_.active()) {
-        HoldJob job;
-        job.n = hold_.mark_drawn();
-        context_->CopyResource(back_buffer.Get(), frames_[pending_slot_].Get());
+
+    // Frame 1 of pending_count_ is on its way (mpv's present). Now the later
+    // frames in between, if any, and last the real frame: each put into the
+    // back buffer (after a present, buffer 0 is the next one) and presented
+    // through the original swap chain, spaced as the screen needs.
+    const int count = pending_count_;
+    HRESULT hr = S_OK;
+    for (int frame = 2; frame <= count && SUCCEEDED(hr); ++frame) {
+        const bool real = frame == count;
+        uint64_t held = 0;
+        // The signal that the frame before is done comes before this one's
+        // drawing: the GPU draws it while that one is on screen.
+        const bool hold = hold_.active();
+        if (hold) held = hold_.mark_drawn();
+        // Frame 1 was drawn at 1 / count of the way from A to B; this one is at frame / count.
+        if (real || !draw_between(back_buffer.Get(), pending_prev_slot_, pending_slot_, float(frame) / count))
+            context_->CopyResource(back_buffer.Get(), frames_[pending_slot_].Get());
+        else
+            capture_.between(context_.Get(), back_buffer.Get(), frame, count - 1);
         glasir::overlay::draw_again(context_.Get(), back_buffer.Get());
-        hold_.wait_release(job.n);
-        const HRESULT hr = swapchain->Present(1, 0);
-        // Let go even if the present failed: the wait is queued either way.
-        job.half = pending_half_;
-        job.latest = pending_latest_;
-        job.line = trace_line(pending_now_, pending_dt_, pending_queued_, "generated");
-        hold_.let_go(job);
-        out_max_ = std::max(out_max_, qpc_seconds() - returned);
-        if (FAILED(hr)) fail("Present of the real frame", hr);
-        stats(qpc_seconds());
-        return;
+
+        TraceLine line = trace_line(pending_now_, pending_dt_, pending_queued_, real ? "generated" : "between");
+        line.frame = frame;
+        line.of = count;
+        if (hold) {
+            // Sync interval 1, like mpv: a 0 could drop a frame in between
+            // still queued, and more than 1 would hold the frame longer than
+            // its step.
+            hold_.wait_release(held);
+            hr = swapchain->Present(1, 0);
+            // Let go even if the present failed: the wait is queued either way.
+            HoldJob job;
+            job.n = held;
+            job.index = frame - 1;
+            job.count = count - 1;
+            job.step = pending_step_;
+            job.lead = lead_;
+            job.latest = pending_latest_;
+            job.line = line;
+            hold_.let_go(job);
+        } else {
+            const double target = pending_now_ + pending_step_ * (frame - 1);
+            sleeper_.until(target);
+            const double out = qpc_seconds();
+            late_max_ = std::max(late_max_, out - target);
+            late_sum_ += out - target;
+            hr = swapchain->Present(1, 0);
+            line.real = out - pending_now_;
+            write_trace(line);
+        }
     }
-    context_->CopyResource(back_buffer.Get(), frames_[pending_slot_].Get());
-    glasir::overlay::draw_again(context_.Get(), back_buffer.Get());
-    sleeper_.until(pending_target_);
-    const double out = qpc_seconds();
-    const double late = out - pending_target_;
-    late_max_ = std::max(late_max_, late);
-    late_sum_ += late;
-    const HRESULT hr = swapchain->Present(1, 0);
+    out_max_ = std::max(out_max_, qpc_seconds() - returned);
     if (FAILED(hr)) fail("Present of the real frame", hr);
-    trace(pending_now_, pending_dt_, pending_queued_, "generated", out - pending_now_);
-    stats(qpc_seconds());  // no ReShade lock held here, both frames queued
+    stats(qpc_seconds());  // no ReShade lock held here, all frames queued
 }
 
 void FrameGen::stats(double now) {
@@ -1821,22 +2167,20 @@ void FrameGen::stats(double now) {
     const double span = now - stats_start_;
     if (span < 5.0) return;
     const Hold::Stats held = hold_.take_stats();
-    real_fps_ = real_ / span;
-    generated_fps_ = generated_ / span;
     if (g_settings.log_stats) {
-        const int max_hz = g_settings.max_output_hz > 0 ? g_settings.max_output_hz : hz_;
         const double n = generated_ ? double(generated_) : 1.0;
         char out[512];
         if (hold_.active() && held.frames == 0) {
             snprintf(out, sizeof(out), "real frame held on the GPU: none in this window");
         } else if (hold_.active()) {
             const double d = held.drawn ? double(held.drawn) : 1.0;
+            const double f = held.firsts ? double(held.firsts) : 1.0;
             snprintf(out, sizeof(out),
                      "real frame held on the GPU %.2f ms avg after the frame in between was done (done %.2f ms "
                      "avg after the add-on drew it), let go %.3f ms late avg, %.3f max; of %u: %u timed (%u of "
                      "them let go early for the next frame, %u already due when done), %u without the done "
                      "signal, %u with a later frame (queue full, resize); queued in %.2f ms max",
-                     held.held_sum / d * 1000.0, held.drawn_sum / d * 1000.0,
+                     held.held_sum / d * 1000.0, held.drawn_sum / f * 1000.0,
                      held.late_sum / (held.timed ? double(held.timed) : 1.0) * 1000.0, held.late_max * 1000.0,
                      held.frames, held.drawn, held.early, held.overdue, held.not_drawn, held.at_once,
                      out_max_ * 1000.0);
@@ -1844,13 +2188,22 @@ void FrameGen::stats(double now) {
             snprintf(out, sizeof(out), "real frame out late by %.3f ms avg, %.3f max", late_sum_ / n * 1000.0,
                      late_max_ * 1000.0);
         }
+        const fg::pacing::SourceCadence::Summary c = cadence_.summary(now);
+        char source[64] = "";
+        if (c.variable)
+            snprintf(source, sizeof(source), ", %.0f-%.0f fps, variable", c.low, c.high);
+        else if (c.uneven)
+            snprintf(source, sizeof(source), ", uneven steps");
+        const fg::pacing::Limit limit = output_limit();
         log_line(reshade::log::level::info,
-                 "%.1f real + %.1f generated fps | interval %.2f ms (%s) | display %d Hz, cap %d Hz | %u late "
-                 "frames, %u dropped upstream after a generated frame | not generated: %u too fast, %u queue full, "
-                 "%u source paused, %u backing off, %u mpv settling, %u effects mix | mpv present %.2f ms avg, "
-                 "%.2f max | %s",
-                 real_ / span, generated_ / span, interval_ * 1000.0, g_link.linked() ? "source" : "mpv", hz_,
-                 max_hz, late_frames_, drops_, skipped_fast_, skipped_queue_, skipped_paused_, skipped_backoff_,
+                 "%.1f real + %.1f generated fps (x%d of up to x%d) | interval %.2f ms (%s%s) | display %.2f Hz "
+                 "(seen refreshing at %.1f), VRR %s, cap %.0f Hz | %u late frames, %u dropped upstream after a "
+                 "generated frame | not generated: %u too fast, %u queue full, %u source paused, %u backing off, "
+                 "%u mpv settling, %u effects mix | mpv present %.2f ms avg, %.2f max | %s",
+                 real_ / span, generated_ / span, gate_.current(), g_settings.multiplier, interval_ * 1000.0,
+                 g_link.linked() ? "source" : "mpv", source, display_hz_, seen_hz_,
+                 g_settings.vrr == fg::pacing::Vrr::On ? "on" : g_settings.vrr == fg::pacing::Vrr::Off ? "off" : "unknown",
+                 limit.hz, late_frames_, drops_, skipped_fast_, skipped_queue_, skipped_paused_, skipped_backoff_,
                  skipped_settle_, skipped_mixed_, mpv_present_sum_ / n * 1000.0, mpv_present_max_ * 1000.0, out);
     }
     if (g_trace) fflush(g_trace);
@@ -1941,7 +2294,10 @@ void set_menu_host() {
     host.set_framegen_enabled = [](bool on) { g_gen.set_enabled(on); };
     host.framegen_fast = [] { return g_settings.fast; };
     host.set_framegen_fast = [](bool fast) { g_gen.set_fast(fast); };
-    host.rates = [](double &source, double &real, double &generated) { g_gen.rates(source, real, generated); };
+    host.framegen_blend = [] { return g_settings.method == fg::Method::blend; };
+    host.set_framegen_blend = [](bool blend) { g_gen.set_blend(blend); };
+    host.framegen_multiplier = [] { return g_settings.multiplier; };
+    host.set_framegen_multiplier = [](int multiplier) { g_gen.set_multiplier(multiplier); };
     host.framegen_status = [] { return g_gen.status(); };
     host.mpv_pipe = g_settings.mpv_pipe;
     glasir::overlay::set_host(host);

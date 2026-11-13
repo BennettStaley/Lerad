@@ -23,7 +23,8 @@ for Windows 11 · [How to install](#-installing)
 ## ✨ Features
 
 - **30 fps games, smooth at 60.** Motion-compensated frame generation
-  (30 → 60, 60 → 120 fps) on any GPU: NVIDIA, AMD or Intel.
+  (30 → 60, 60 → 120 fps; up to x4 on a fast screen if you ask for it) on
+  any GPU: NVIDIA, AMD or Intel.
 - **HDR that looks right from the start.** SDR and HDR from the same app,
   switched in the menu, with nothing to calibrate.
 - **DLSS 5 neural rendering** on NVIDIA RTX 30, 40 and 50 series GPUs.

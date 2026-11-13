@@ -141,6 +141,12 @@ bool apply(Settings &s, const std::wstring &section, const std::wstring &key, co
     } else if (name == L"framegen.max_output_hz") {
         if (!parse_int(value, 0, 1000, n) || (n && n < 24)) return bad(L"0 or 24 to 1000");
         s.framegen_max_hz = int(n);
+    } else if (name == L"framegen.multiplier") {
+        if (!parse_int(value, 2, 4, n)) return bad(L"2, 3 or 4");
+        s.framegen_multiplier = int(n);
+    } else if (name == L"framegen.show_rates") {
+        if (!parse_bool(value, b)) return bad(L"1 or 0");
+        s.framegen_show_rates = b;
     } else if (name == L"frames.dedup") {
         if (!parse_bool(value, b)) return bad(L"1 or 0");
         s.dedup = b;
@@ -317,19 +323,32 @@ dedup_threshold = 3
 dedup_keepalive_ms = 200
 
 [framegen]
-; 1: frame generation doubles the frame rate (30 -> 60, 60 -> 120) when the
-; display can show it. Needs dedup = 1 and ReShade. F8 toggles it while playing;
-; the menu (Tab) switches it and keeps the choice here.
+; 1: frame generation adds frames between the game's (30 -> 60, 60 -> 120)
+; when the screen can show them. Needs dedup = 1 and ReShade. F8 toggles it
+; while playing; the menu (Tab) switches it and keeps the choices here, and
+; says what is shown and why when it is less than asked for.
 enabled = 1
 ; high, or fast (about half the GPU time, a little less clean).
 quality = high
 ; motion: the frame in between follows what moves (the default). blend: a
 ; plain mix of the two frames (the lightest; moving things show double).
 method = motion
-; The most frames a second frame generation shows. 0: the screen's refresh
-; rate. A little under it (116 on a 120 Hz screen) keeps a VRR screen inside
-; its range.
+; Frames shown per game frame, at most: 2 (one frame in between), 3 or 4
+; (two or three: 30 -> 90 or 120 on a fast screen). More costs GPU time for
+; each added frame and shows the game's own frame later (half a game frame
+; at 2, two thirds at 3, three quarters at 4). Glasir uses the most that
+; fits the screen: with 4 on a 120 Hz screen, a 30 fps game is shown at 120
+; and a 60 fps game at 120 (x2).
+multiplier = 2
+; Frames are only added while the result stays at or under this many a
+; second. 0: the screen's refresh rate. With VRR, a value under the screen's
+; rate keeps the result inside the VRR range: 100 on a 120 Hz screen shows a
+; 30 fps game at 90 (x3) instead of 120 (x4) with multiplier = 4. It cannot
+; make 60 -> 120 fit under 120: that game is then shown at 60.
 max_output_hz = 0
+; 1: a small readout in the top left corner while playing: the game's rate,
+; the rate shown, the screen's rate. The menu (Tab) switches it.
+show_rates = 0
 ; While frame generation is off (F8): 1 = send mpv every frame (lowest
 ; latency), 0 = new frames only.
 all_frames_when_off = 1
