@@ -97,6 +97,9 @@ void write_reshade_config(const std::wstring &engine_dir, const Settings &s, boo
     // the session).
     put(ini, L"GLASIR_FRAMEGEN", L"Enabled", s.framegen ? L"1" : L"0");
     put(ini, L"GLASIR_FRAMEGEN", L"Quality", s.framegen_fast ? L"fast" : L"high");
+    put(ini, L"GLASIR_FRAMEGEN", L"Method", s.framegen_blend ? L"blend" : L"motion");
+    put(ini, L"GLASIR_FRAMEGEN", L"Multiplier", std::to_wstring(s.framegen_multiplier));
+    put(ini, L"GLASIR_FRAMEGEN", L"MaxOutputHz", std::to_wstring(s.framegen_max_hz));
     put(ini, L"GLASIR_FRAMEGEN", L"DedupWhenOff", s.all_frames_when_off ? L"0" : L"1");
     put(ini, L"GLASIR_FRAMEGEN", L"MpvPipe", L"glasir");
 

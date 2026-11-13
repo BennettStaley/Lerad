@@ -43,7 +43,9 @@ Keep / build:
 - SDR and HDR from one launcher (switch in the menu / per-console presets;
   restarts the pipeline). Auto-detecting HDR from the picture is a later experiment.
 - Dedup, frame generation x2 with VRR hold pacing, low-latency "send repeats"
-  switch (frame gen off).
+  switch (frame gen off). *(later: x3 and x4 as an option,
+  `[framegen] multiplier`; the menu shows the rates as they are and says why
+  when fewer frames are added)*
 - DLSS 5 with neural rendering on/off.
 - Upscaling: mpv's built-in scaling + FSR1 (any GPU); RTX VSR on NVIDIA.
   DLSS / FSR upscaling later, enabled by compatibility. *(done: [video]

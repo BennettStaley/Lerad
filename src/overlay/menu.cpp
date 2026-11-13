@@ -9,6 +9,7 @@
 
 #include <imgui.h>
 
+#include "framegen_text.h"
 #include "ini_edit.h"
 #include "ui_style.h"
 
@@ -117,25 +118,25 @@ bool slider(const char *label, const char *id, int *value, int lo, int hi, const
     return changed;
 }
 
+// The line under the title: the picture's size, SDR or HDR, what the card
+// delivers and what is shown (over the last second), and the screen.
 std::string status_line(const MenuFrame &f, const MpvState &mpv) {
     char text[160];
     std::string out;
+    const auto add = [&out](const std::string &part) {
+        if (part.empty()) return;
+        out += out.empty() ? "" : "  \xC2\xB7  ";
+        out += part;
+    };
     if (mpv.width > 0 && mpv.height > 0) {
         std::snprintf(text, sizeof(text), "%dx%d", mpv.width, mpv.height);
-        out = text;
+        add(text);
     }
-    out += out.empty() ? "" : "  \xC2\xB7  ";
-    out += f.source_hdr ? "HDR" : "SDR";
-    if (f.host && f.host->rates) {
-        double source = 0, real = 0, generated = 0;
-        f.host->rates(source, real, generated);
-        if (generated >= 1)
-            std::snprintf(text, sizeof(text), "  \xC2\xB7  %.0f \xE2\x86\x92 %.0f fps", source, real + generated);
-        else if (source >= 1)
-            std::snprintf(text, sizeof(text), "  \xC2\xB7  %.0f fps", source);
-        else
-            text[0] = 0;
-        out += text;
+    add(f.source_hdr ? "HDR" : "SDR");
+    if (f.host && f.host->framegen_status) {
+        const FramegenStatus st = f.host->framegen_status();
+        add(rates_text(st));
+        add(screen_text(st));
     }
     return out;
 }
@@ -172,39 +173,53 @@ void picture(const MenuFrame &f, const MpvState &mpv) {
         save(f, "framegen", "enabled", fg ? "1" : "0");
     }
     if (ready && fg) {
-        bool fast = h.framegen_fast && h.framegen_fast();
         ImGui::Indent();
-        ImGui::TextUnformatted("Quality");
-        ImGui::SameLine();
-        if (ImGui::RadioButton("High", !fast) && fast && h.set_framegen_fast) {
-            h.set_framegen_fast(false);
-            save(f, "framegen", "quality", "high");
-        }
-        ImGui::SameLine();
-        if (ImGui::RadioButton("Fast", fast) && !fast && h.set_framegen_fast) {
-            h.set_framegen_fast(true);
-            save(f, "framegen", "quality", "fast");
-        }
-        ImGui::Unindent();
+        // What it is doing now, then what is in its way, then the choices.
         if (h.framegen_status) {
             const FramegenStatus st = h.framegen_status();
             char text[200];
-            if (st.kind == FramegenStatus::Paused) {
-                std::snprintf(text, sizeof(text),
-                              "Paused, back in %.0f s: the GPU could not keep up (mpv dropped frames). "
-                              "Fast quality or a lighter DLSS 5 setting leaves it more room.",
-                              std::ceil(st.seconds_left));
-                warn(text);
-            } else if (st.kind == FramegenStatus::TooFast) {
-                std::snprintf(text, sizeof(text), "Not doubling: the display shows at most %d Hz.", st.display_hz);
+            if (st.multiplier > 1 && st.source_fps >= 1) {
+                std::snprintf(text, sizeof(text), "Game %.0f fps%s, shown %.0f (x%d)", st.source_fps,
+                              st.source_variable ? ", variable" : st.source_uneven ? ", in uneven steps" : "",
+                              shown_fps(st), st.multiplier);
                 note(text);
             }
+            for (const Line &line : {reason_text(st), cadence_text(st)}) {
+                if (line.text.empty()) continue;
+                if (line.matters)
+                    warn(line.text.c_str());
+                else
+                    note(line.text.c_str());
+            }
         }
+        const bool fast = h.framegen_fast && h.framegen_fast();
+        const int quality = radio_row("Quality", {"High", "Fast"}, fast ? 1 : 0);
+        if (quality >= 0 && h.set_framegen_fast) {
+            h.set_framegen_fast(quality == 1);
+            save(f, "framegen", "quality", quality == 1 ? "fast" : "high");
+        }
+        const bool blend = h.framegen_blend && h.framegen_blend();
+        const int method = radio_row("Method", {"Motion", "Blend"}, blend ? 1 : 0);
+        if (method >= 0 && h.set_framegen_blend) {
+            h.set_framegen_blend(method == 1);
+            save(f, "framegen", "method", method == 1 ? "blend" : "motion");
+        }
+        const int multiplier = h.framegen_multiplier ? h.framegen_multiplier() : 2;
+        const int up_to = radio_row("Up to", {"x2", "x3", "x4"}, multiplier - 2);
+        if (up_to >= 0 && h.set_framegen_multiplier) {
+            h.set_framegen_multiplier(up_to + 2);
+            save(f, "framegen", "multiplier", std::to_string(up_to + 2));
+        }
+        note("Fast: about half the GPU time, rougher edges. Blend: lightest, moving things show double. "
+             "x3, x4: smoother on a fast screen; more GPU time, and the game's own frame shows a little later.");
+        ImGui::Unindent();
     }
     if (!ready) {
         ImGui::EndDisabled();
         note("Frame generation needs Glasir's own capture with dedup (not the DirectShow fallback).");
     }
+    if (f.show_rates && ImGui::Checkbox("Show frame rates", f.show_rates))
+        save(f, "framegen", "show_rates", *f.show_rates ? "1" : "0");
 
     // Scaling up (glasir_scaling.lua in mpv): switched at once.
     if (!mpv.scaling.empty()) {
@@ -393,6 +408,29 @@ void draw_toast(const std::string &text, float alpha, float scale) {
     ImGui::PopFont();
     ImGui::End();
     ImGui::PopStyleVar(4);
+}
+
+void draw_rates(const Host &host, float scale) {
+    if (!host.framegen_status) return;
+    const FramegenStatus st = host.framegen_status();
+    std::string text = rates_text(st);
+    const std::string screen = screen_text(st);
+    if (!text.empty() && !screen.empty()) text += "  \xC2\xB7  ";
+    text += screen;
+    if (text.empty()) return;
+    ImGui::SetNextWindowPos(ImVec2(12.0f * scale, 12.0f * scale));
+    ImGui::SetNextWindowBgAlpha(0.55f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8.0f * scale, 4.0f * scale));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 4.0f * scale);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+    ImGui::Begin("##rates", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoInputs |
+                     ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoSavedSettings);
+    ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase * 0.85f);
+    ImGui::TextUnformatted(text.c_str());
+    ImGui::PopFont();
+    ImGui::End();
+    ImGui::PopStyleVar(3);
 }
 
 bool draw_menu(const MenuFrame &f) {

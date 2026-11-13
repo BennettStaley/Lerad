@@ -8,22 +8,79 @@ the zip from `Bug reports\` to an
 
 ## Frame generation does not double the frame rate
 
-Open the menu (`Tab`). Its top line shows the rate, e.g. `60 → 120 fps` when
-frame generation is working. Under "Frame generation" it says why it is not:
+Open the menu (`Tab`). Its top line shows what the card delivers, what is
+shown and the screen, measured over the last second:
+`30 → 60 fps · 120 Hz VRR`. With frame generation off it shows the game's
+rate alone. "Show frame rates" keeps the same line in the corner while you
+play.
+
+Under "Frame generation" the menu says what is in the way when fewer frames
+are shown than asked for:
 
 - **"Paused, back in N s: the GPU could not keep up"**: mpv dropped frames, so
   frame generation stepped back for a while (5 s, then longer if it keeps
   happening). DLSS 5 and frame generation share the GPU; at 60 → 120 fps each
-  frame has about 8 ms. Choose **Fast** quality, use a lighter DLSS 5 setting,
-  or capture at a lower resolution. Close other programs that use the GPU.
-- **"Not doubling: the display shows at most N Hz"**: twice the game's rate
-  would be more than the screen can show (60 fps needs a 120 Hz screen).
+  frame has about 8 ms. Choose **Fast** quality, a smaller multiplier, a
+  lighter DLSS 5 setting, or capture at a lower resolution. Close other
+  programs that use the GPU.
+- **"No frames added: 60 fps doubled is more than this 100 Hz screen
+  shows"**: twice the game's rate would be more than the screen can show
+  (60 fps needs a 120 Hz screen).
+- **"x2, not x4: more would be over what this 120 Hz screen shows"**: you
+  asked for up to x4, and x2 is the most that fits this game's rate.
+- **"104 of 120 fps: the screen takes frames late"**: Windows is composing
+  Glasir's window instead of showing it directly, so frames wait and some
+  are left out. Use full screen or borderless, with "Skip the black bars"
+  off, and click into Glasir.
+- **"... of the game's frames were dropped"**: the GPU is at its limit; as
+  for "Paused" above.
+- **"The picture is still: nothing to add"**: a paused game or a still menu
+  sends no new frames.
 - The checkbox is greyed out: the card is used through DirectShow (cards
   Media Foundation cannot open), which has no frame generation.
+
+The choices under "Frame generation":
+
+| Choice | What it gives | What it costs |
+|---|---|---|
+| Quality **High** / **Fast** | Fast: about half the GPU time of each added frame | Rougher edges around moving things |
+| Method **Motion** / **Blend** | Blend: the lightest; a plain mix of two frames | Moving things show double |
+| Up to **x2** / **x3** / **x4** | x3, x4: two or three frames between the game's (30 → 90 or 120 fps) on a screen fast enough | GPU time for each added frame, and the game's own frame is shown later: half a game frame at x2, two thirds at x3, three quarters at x4 (17, 22 and 25 ms at 30 fps) |
+
+Glasir uses the most frames that fit the screen, up to your choice: with x4
+on a 120 Hz screen, a 30 fps game is shown at 120 and a 60 fps game at 120
+(x2). `[framegen] max_output_hz` in glasir.ini sets a lower ceiling: 100 on a
+120 Hz VRR screen keeps a 30 fps game at 90 (x3), inside the VRR range.
 
 In the NVIDIA Control Panel, leave "Power management mode" for mpv at its
 default: "Prefer maximum performance" made each frame about 2 ms slower in
 tests.
+
+## Frames look uneven (judder) with frame generation
+
+How evenly the added frames reach the screen depends on the screen. The menu
+says when yours makes them uneven.
+
+- **A VRR screen (G-SYNC, FreeSync), the result below its refresh rate**
+  (30 → 60 or 90 on 120 Hz): even. Glasir shows each frame at its moment and
+  the screen follows.
+- **A VRR screen, the result equal to its refresh rate** (60 → 120, or
+  30 → 120 with x4, on 120 Hz): "120 fps fills this 120 Hz screen". VRR has
+  no room left, so frames follow the screen's refreshes. That is usually
+  still smooth; if it is not, choose x3 for a 30 fps game (90 fps, inside the
+  range).
+- **"VRR is not engaging: the screen keeps refreshing at 120 Hz"**: Glasir
+  watched the screen refresh at its full fixed rate while showing fewer
+  frames, so VRR is not working for Glasir's window. See "VRR / G-SYNC"
+  below. Until it does, frames land on whole refreshes and can alternate
+  short and long.
+- **A screen without VRR whose rate is a multiple of the result** (60 or
+  120 fps on 120 or 240 Hz): frames land on whole refreshes; mostly even,
+  with an occasional short and long pair.
+- **A screen without VRR whose rate is not a multiple** (120 fps on 144 or
+  165 Hz): "Uneven on this screen: 120 fps does not divide 144 Hz". Set the
+  screen to the rate the menu names (120 Hz) in Windows' display settings,
+  or turn VRR on.
 
 ## VRR / G-SYNC
 
@@ -57,6 +114,32 @@ tests.
   by Windows, a frame later, and frame generation reaches only about 100 of
   120 fps. If the menu shows less than double, turn "Skip the black bars"
   off.
+- To check: with frame generation on, the menu warns "VRR is not engaging"
+  when the screen keeps its fixed rate. The screen's own refresh rate
+  display (most have one in their menu) should follow the rate Glasir shows.
+- If Glasir shows the wrong thing after "Hz" in the menu's top line ("VRR",
+  "fixed" or nothing when it could not tell), set `[display] vrr = on` or
+  `off` in glasir.ini.
+
+## Other frame generation: NVIDIA Smooth Motion, AMD AFMF, Lossless Scaling
+
+Glasir's own frame generation is the one to use: it works on any GPU, sees
+only the game's new frames, runs after DLSS 5, keeps the menu out of the
+generated frames and times them for VRR. Use one frame generator at a time:
+turn Glasir's off (F8) before trying another.
+
+- **NVIDIA Smooth Motion** (RTX 40 and 50, set per program in the NVIDIA
+  app): x2 only. The one report with mpv found it did nothing on Direct3D 11,
+  which Glasir uses. Not recommended.
+- **AMD Fluid Motion Frames** (Radeon RX 6000 and newer): needs full screen
+  or borderless with VSync off, switches itself off in fast motion, and AMD
+  recommends a base of 55 fps or more, so a 30 fps game is below it. It also
+  treats Glasir's menu as part of the picture.
+- **Lossless Scaling** (a paid program, any GPU): works on Glasir's window
+  as on any other, up to x20, and can run on a second GPU. It captures the
+  finished window, so the menu and messages are interpolated too, and it
+  adds its own delay. The choice if you have a second GPU to give it.
+- Intel has no driver frame generation for programs that do not build it in.
 
 ## Black bars on an ultrawide screen
 

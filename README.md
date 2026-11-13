@@ -23,7 +23,8 @@ for Windows 11 · [How to install](#-installing)
 ## ✨ Features
 
 - **30 fps games, smooth at 60.** Motion-compensated frame generation
-  (30 → 60, 60 → 120 fps) on any GPU: NVIDIA, AMD or Intel.
+  (30 → 60, 60 → 120 fps; up to x4 on a fast screen if you ask for it) on
+  any GPU: NVIDIA, AMD or Intel.
 - **HDR as the console sends it.** HDR10 goes to an HDR screen untouched,
   so the console's own HDR calibration fits your screen; on a screen
   without HDR (or with HDR off in Windows) it is tone mapped to SDR

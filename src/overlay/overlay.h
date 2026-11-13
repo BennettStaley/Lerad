@@ -9,6 +9,10 @@
 // go to the menu, not to mpv; mpv gets every frame and frame generation
 // rests, so the menu redraws at the capture rate even on a still picture.
 //
+// "Show frame rates" in the menu keeps a small readout in the top left corner
+// (what the card delivers, what is shown, the screen's rate), drawn the same
+// way, so it costs DLSS 5 and frame generation nothing.
+//
 // It also shows toasts: short messages at the top of the picture for the
 // keys (volume, mute, boost, delay, frame generation, screenshots) instead of
 // mpv's OSD, which would go through DLSS 5 and frame generation. mpv's
@@ -21,14 +25,9 @@
 
 #include <reshade.hpp>
 
-namespace glasir::overlay {
+#include "framegen_status.h"
 
-// Why frame generation is not doubling the frame rate just now, if it is not.
-struct FramegenStatus {
-    enum Kind { Running, Paused, TooFast } kind = Running;
-    double seconds_left = 0;  // Paused: until it tries again
-    int display_hz = 0;       // TooFast: the most the display shows
-};
+namespace glasir::overlay {
 
 // What the add-on around the menu does (frame generation).
 struct Host {
@@ -37,9 +36,12 @@ struct Host {
     void (*set_framegen_enabled)(bool on) = nullptr;
     bool (*framegen_fast)() = nullptr;
     void (*set_framegen_fast)(bool fast) = nullptr;
-    // Frames per second over the last seconds: from the source, real and
-    // generated as presented.
-    void (*rates)(double &source, double &real, double &generated) = nullptr;
+    bool (*framegen_blend)() = nullptr;  // a plain mix instead of following the motion
+    void (*set_framegen_blend)(bool blend) = nullptr;
+    int (*framegen_multiplier)() = nullptr;  // frames shown per source frame, at most: 2, 3 or 4
+    void (*set_framegen_multiplier)(int multiplier) = nullptr;
+    // The rates over the last second, the screen, and why fewer frames are
+    // added than asked for (framegen_status.h).
     FramegenStatus (*framegen_status)() = nullptr;
     std::string mpv_pipe = "glasir";  // mpv's IPC pipe name
 };

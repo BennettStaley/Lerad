@@ -26,12 +26,15 @@ captures (real game frames) are never committed.
 8. [The GPU budget](#8-the-gpu-budget)
 9. [Testing: tools and gotchas](#9-testing-tools-and-gotchas)
 10. [Known leftovers and open ideas](#10-known-leftovers-and-open-ideas)
+11. [More than x2, screens without VRR, honest numbers (11-12)](#11-more-than-x2-screens-without-vrr-honest-numbers-11-12)
+12. [Other frame generators](#12-other-frame-generators)
 
 ---
 
 ## 1. Goal and constraints
 
-- x2 only: 30 → 60 and 60 → 120 fps (the owner's call; x3/x4 never built).
+- x2 only: 30 → 60 and 60 → 120 fps (the owner's call). x3 and x4 were
+  added on 11-12 as an option, never the default (section 11).
 - Two frames, nothing else: a capture card gives no motion vectors, no depth,
   no HUD mask. The add-on finds its own motion. (It uses no ReShade motion
   vectors either, which was once suspected of causing a ghost.)
@@ -509,7 +512,160 @@ can be avoided.
     dodge).
 - **Ideas not pursued:**
   - finer motion at object edges (4x4 on boundary cells only);
-  - x3/x4 (needs the pacing generalised);
+  - x3/x4: built 11-12 as an option (section 11); its picture quality on
+    game captures is not judged yet;
   - frame generation on the second GPU;
   - an offline VFG comparison;
   - a z-order rule that keeps NPCs solid without hair artefacts.
+
+## 11. More than x2, screens without VRR, honest numbers (11-12)
+
+Done in Glasir on a PC with an RTX 5090 and a 240 Hz screen, with a synthetic
+source (a Python pacer writing NV12 into `Glasir.exe --input-raw -`); no
+capture card, no game captures, no focused VRR window. Tools: the add-on's
+trace with its new `#screen` lines, and PresentMon 2.6 (it runs without
+administrator rights for members of "Performance Log Users"). The numbers
+are in [src/framegen/README.md](../src/framegen/README.md), "What the screen
+does to the pacing".
+
+### 11.1 x3 and x4
+
+- **What it took:**
+  - the shaders already take any position between the two frames
+    (`DrawOptions::t`), so no shader or `fg_interp.h` change;
+  - the first frame in between is drawn in `reshade_present` as before, the
+    later ones and the real frame in `finish_present`, each behind its own
+    GPU wait; the hold's thread lets them go a step apart, timed from when
+    the first was done;
+  - `MultiplierGate` picks the most frames that fit the screen, up to the
+    setting.
+- **Proven:** the steps on the CPU (x3 11.11 ms sd 0.01-0.05, x4 8.32-8.34 ms
+  sd 0.13 at 30 fps), and where the frames sit (0.24 / 0.50 / 0.76 and
+  0.34 / 0.66 of a moving bar's step, from F9 captures).
+- **Not proven:** the on-screen spacing with VRR engaged (it follows from
+  the x2 measurements of section 6 only if the screen behaves the same for
+  shorter steps), the GPU budget next to DLSS 5 at 4K, and the picture
+  quality of thirds and quarters on game captures.
+- **A bug found by measuring, not by looking:** the later frames were first
+  drawn at (n - 1) / count instead of n / count, so x4 showed the first frame
+  in between twice. The frames looked fine one by one; the bar's position in
+  the captures gave it away. Check positions whenever t is touched.
+- **Cost:** every frame in between runs the whole interpolation; mpv's
+  thread is busy until the second to last frame is let go (13.5 ms at
+  30 fps x4). At 60 fps x4 the steps were squeezed (3.83 instead of 4.17 ms)
+  to be out before the next frame's effects.
+- **Latency:** the real frame is shown (count - 1) / count of a source frame
+  after the first frame in between: 16.7, 22.2 and 25 ms at 30 fps for x2,
+  x3, x4.
+
+### 11.2 Dead ends
+
+- **Sync intervals instead of the hold on a fixed-refresh screen**
+  (`Present(n, 0)`, n = the refreshes the frame should come after the one
+  before): in a composed window 30 → 60 on 240 Hz gave 2 and 6 refreshes,
+  not 4 and 4; x4 gave 3, 2, 2, 1. A present with n > 1 also counts as queued
+  for the "queue full" rule, which then left out most frames. Removed.
+- **A lead found by feedback** (let held frames go earlier until the frame
+  after the first one lands the wanted number of refreshes later, read from
+  the swap chain's frame statistics):
+  - reading the statistics on the hold's thread deadlocked with mpv's blocked
+    present at x3 and x4 (one-second stalls);
+  - in a composed window the reading is late and mixed with "queue full"
+    effects: at 60 fps the lead ran to its limit and made things worse.
+  Removed. What stayed is the fixed test switch `GLASIR_FRAMEGEN_LEAD_MS`.
+- **Taking the focus for a measurement:** a window started from a terminal
+  the user is typing in does get the focus. The test runner now calls
+  `LockSetForegroundWindow` first and gives the focus back if it moves.
+
+### 11.3 Screens without VRR (or with VRR not engaging)
+
+- The hold times the real frame from when the frame in between was *done*.
+  On a fixed refresh "done" comes just after a refresh (a constant 4.55 ms
+  after the add-on drew, in a composed window on 240 Hz), so a whole
+  number of refreshes later is just too late for the refresh meant: 5 and 3
+  refreshes instead of 4 and 4 at 30 → 60 on 240 Hz.
+- Letting go 5 ms earlier fixed most of it (78 % of frames on 4 refreshes);
+  2 ms did not (a third each on 3, 4 and 5). The lead needed is about a
+  refresh plus Windows' composition time there, and will be less for a
+  window shown directly (not measured: it needs a focused full-screen window
+  on a fixed-refresh screen).
+- **The plan, if this is taken further:** a sampler thread of its own (like
+  the trace's, never the hold's), only while the screen is seen refreshing
+  at a fixed rate, that reads on which refresh each present was shown; from
+  that, move the lead a quarter refresh at a time until the frame after the
+  first lands the wanted number of refreshes later; stop adjusting while
+  "queue full" is counting. Test on a focused full-screen window with VRR off
+  in the driver, then with VRR on to see that nothing moves.
+- **Telling that VRR is not engaging:** the swap chain's `SyncRefreshCount`
+  read once a second gave 240.0 refreshes a second in every run here
+  (composed, fixed). The add-on reports that when clearly fewer frames are
+  shown. Still to confirm on a focused VRR window: that the count then
+  follows the frames (if it does not, the warning would be shown wrongly
+  there; it changes no pacing).
+
+### 11.4 The numbers shown
+
+- The menu's old line came from the 5 s log window and showed twice the
+  source rate while frames were being left out. Now the rates are counted
+  over the last second from the presents themselves, the source's from the
+  link's arrival times, and the reason is the latest frame's decision (or,
+  for the ones that come and go, what was counted in the last second).
+- While frame generation is off mpv gets the repeats too, so "frames
+  presented" is the capture rate; the menu then gives the game's rate only.
+
+### 11.5 A source whose rate moves
+
+- Fed 40-58 fps swinging every 4 s on a 120 Hz grid: no "too fast", no
+  back-off, no resets; the interval (a mean of the last 14 gaps) followed
+  between 17.9 and 25 ms, and the log and menu read "40-57 fps, variable".
+- The real frame is held half the *mean* gap, so with gaps of 16.7 and 25 ms
+  the two halves are uneven by a few milliseconds either way. The next gap
+  cannot be known; nothing better was found, and nothing was changed.
+- One thing was: a rate that wanders across what the screen can show (a VRR
+  game at 80-90 fps on 165 Hz) switched generation on and off with every
+  swing. `MultiplierGate` now gives what is running 3 % more room and waits
+  two seconds before going up again.
+
+## 12. Other frame generators
+
+Researched on the web 2026-11-12; nothing here was run. Sources are the
+vendors' pages and release notes where they exist, press and forum reports
+otherwise.
+
+- **NVIDIA Smooth Motion** (driver level; RTX 50, RTX 40 since driver 581.08
+  of August 2025): DX11, DX12 and Vulkan, 64-bit, x2 only, set per program in
+  the NVIDIA app or with Profile Inspector.
+  - The one report with mpv
+    ([mpv issue 17140](https://github.com/mpv-player/mpv/issues/17140)): it
+    did nothing with mpv's D3D11 context, worked with `gpu-context=winvk`,
+    warped subtitles, and later flickered after driver updates.
+  - NVIDIA says its present layer can upset third-party overlays; with
+    Special K injected one user's rate fell
+    ([Special K issue 359](https://github.com/SpecialKO/SpecialK/issues/359)).
+    Nothing found on ReShade as `dxgi.dll`, on HDR, or on windowed mode.
+  - It would see Glasir's menu as picture, and a second generator on top of
+    Glasir's adds latency for nothing (NVIDIA says the same of DLSS frame
+    generation plus Smooth Motion).
+- **AMD Fluid Motion Frames** (AFMF 2.1, Adrenalin 25.3.1; RX 6000 and
+  newer): DX11, DX12, Vulkan, OpenGL; exclusive or borderless full screen,
+  VSync off; switches itself off in fast motion; AMD's notes recommend a
+  base of 55 fps at 1080p and 70 at 1440p, well above a 30 fps console game;
+  its release notes list overlays as a reason for it to go inactive. Nothing
+  found on mpv.
+- **Intel:** no driver-level frame generation for programs that do not
+  build it in (XeSS frame generation is for games that ship it).
+- **Lossless Scaling** (LSFG 3, any GPU, paid): works on any window by
+  capturing it, x2 to x20 or a target rate, G-SYNC support, a second-GPU
+  mode. It counts the presents it sees, so Glasir's dedup (30 presents a
+  second for a 30 fps game) is what it wants; it captures the finished
+  window, menu included, and adds its own delay. HDR passthrough not
+  confirmed.
+- **Neural interpolation, again:** RIFE through VapourSynth and TensorRT
+  runs 4K x2 in real time on an RTX 4090 or 5090 only with most of the GPU,
+  as a filter that buffers frames; NVIDIA's Maxine Video Frame Generation is
+  an SDK filter with no latency figures published. Both as in section 4.1:
+  over budget for live play next to DLSS 5.
+- **What Glasir should say:** its own frame generation for everyone; one
+  generator at a time; Lossless Scaling for someone with a second GPU to
+  give it; the driver options are not recommended until someone measures
+  them on mpv's D3D11 swap chain with ReShade loaded.
