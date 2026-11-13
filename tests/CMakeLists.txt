@@ -40,6 +40,12 @@ glasir_component(test_advice)
 target_link_libraries(test_advice PRIVATE glasir_app_core)
 add_test(NAME advice COMMAND test_advice)
 
+# The launcher's words and what it saves (no window).
+add_executable(test_launcher test_launcher.cpp)
+glasir_component(test_launcher)
+target_link_libraries(test_launcher PRIVATE glasir_app_core)
+add_test(NAME launcher COMMAND test_launcher)
+
 add_executable(test_audio test_audio.cpp)
 glasir_component(test_audio)
 target_link_libraries(test_audio PRIVATE glasir_capture)

@@ -1403,10 +1403,7 @@ private:
     // The most frames a second that may be shown: the user's limit when it
     // is below the screen's rate, else the screen's (60 when unknown).
     fg::pacing::Limit output_limit() const {
-        const double screen = display_hz_ > 0 ? display_hz_ : 60.0;
-        if (g_settings.max_output_hz > 0 && g_settings.max_output_hz < screen)
-            return {double(g_settings.max_output_hz), true};
-        return {screen, false};
+        return fg::pacing::output_limit(display_hz_, g_settings.max_output_hz);
     }
     void reset_history() {
         prev_ = -1;

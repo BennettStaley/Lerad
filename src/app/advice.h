@@ -22,7 +22,9 @@
 
 #include "devices.h"
 #include "display.h"
+#include "framegen_status.h"
 #include "gpu.h"
+#include "hdr.h"
 #include "settings.h"
 
 namespace glasir {
@@ -57,6 +59,11 @@ enum class AdviceSeverity {
 enum class AdviceKind {
     Limit,           // something the hardware or a setting holds back, with the reason
     Recommendation,  // a setting that suits this PC, with a one-line why
+    // What to set on the console for these choices. The console only knows
+    // what the capture card's HDMI input says it takes, not what Glasir will
+    // do with the picture, so Glasir says it in words. Nothing of it can be
+    // set from here; the ids start with "console-".
+    Console,
 };
 
 struct AdviceItem {
@@ -69,13 +76,28 @@ struct AdviceItem {
     // Windows or the GPU's control panel).
     std::vector<SettingValue> suggest;
     bool applied = false;  // suggest is what the settings already say
+    // Console items: the setting in two or three words ("2160p", "HDR on",
+    // "VRR off"), for a UI that lists them on a line. Empty for a hint that
+    // is not a setting (the HDR calibration).
+    std::wstring brief;
 };
 
-// One game frame rate and what the screen shows for it.
+// One game frame rate and what the screen shows for it, as the frame
+// generation add-on will decide it (src/framegen/fg_pacing.h: the same
+// functions are asked here).
 struct ShownRate {
     double game_fps = 0;   // what the console renders: 30, 60, 120 (dedup finds it while playing)
     double shown_fps = 0;  // what the screen shows
-    bool doubled = false;  // by frame generation
+    // Frames shown per game frame: 1, none are added; 2, 3 or 4 by frame
+    // generation (the most that fits, up to framegen.multiplier).
+    int multiplier = 1;
+    // multiplier < the setting: a larger one would fit the screen's rate, but
+    // not on whole refreshes of a screen known to refresh at a fixed rate.
+    bool kept_even = false;
+    // How evenly the frames can reach this screen (Unknown when none are
+    // added), and for an uneven one a refresh rate that would make it even.
+    FramegenStatus::Cadence cadence = FramegenStatus::Cadence::Unknown;
+    int better_hz = 0;
 };
 
 struct Outcome {
@@ -85,14 +107,22 @@ struct Outcome {
     bool media_foundation = false;  // false: mpv's DirectShow input (no dedup, no frame generation)
     double raw_gb_per_s = 0;        // Media Foundation: raw frames through the pipe to mpv
 
-    // Frame generation will run (it doubles only the rates marked in shown).
+    // Frame generation will run (it adds frames only to the rates marked in shown).
     bool framegen = false;
-    double max_shown_hz = 0;       // the most the screen shows (the refresh rate, or framegen.max_output_hz)
+    int multiplier_wanted = 2;  // framegen.multiplier: at most this many frames per game frame
+    // The most frames a second that are shown: the screen's refresh rate, or
+    // framegen.max_output_hz when that is below it (capped). 0: the screen's
+    // rate is not known (frame generation finds it while playing).
+    double max_shown_hz = 0;
+    bool capped = false;
     std::vector<ShownRate> shown;  // for the game rates this capture rate can carry
 
     // An HDR capture: sent to the screen as HDR, or tone mapped to SDR.
     enum class Hdr { SdrCapture, Hdr, ToneMapped };
     Hdr hdr = Hdr::SdrCapture;
+    // An HDR capture: all of what hdr.h decides (why, fitted to which peak);
+    // hdr_plan_text() says it in a line.
+    HdrPlan hdr_plan;
 
     // Variable refresh as the add-ons are told: "on", "off" or "unknown"
     // (vrr_for_addons: glasir.ini's display.vrr, else as found).
@@ -106,7 +136,7 @@ struct Outcome {
 
 struct Advice {
     Outcome outcome;
-    std::vector<AdviceItem> items;  // problems first, then warnings, limits, recommendations
+    std::vector<AdviceItem> items;  // problems first, then warnings, limits, recommendations, the console's settings
 };
 
 Advice advise(const AdviceInput &in);

@@ -27,6 +27,12 @@ struct MenuFrame {
     int hdr_peak_nits = 0;         // the screen's peak fitting uses (glasir.ini's, else the screen's); 0: unknown
     bool hdr_dynamic_peak = false; // glasir.ini hdr.dynamic_peak
     bool borderless = true;      // glasir.ini window.mode when mpv started (the menu follows its own switches)
+    // The screen Glasir.exe chose and its variable refresh as it told the
+    // add-ons (GLASIR_DISPLAY_*): "1 (PA279CDV)"; "on", "off" or "unknown";
+    // whether that is glasir.ini's display.vrr. Empty: not told.
+    std::string display_name, display_vrr;
+    bool display_vrr_set = false;
+    double display_hz = 0;
     float scale = 1;             // 1 at 1080 lines
     bool *show_rates = nullptr;  // the readout in the corner (glasir.ini framegen.show_rates); the menu switches it
 };

@@ -487,6 +487,83 @@ bool save_settings(const std::wstring &path, const std::vector<SettingValue> &va
     return false;
 }
 
+std::vector<SettingValue> changed_settings(const Settings &from, const Settings &to) {
+    std::vector<SettingValue> v;
+    const auto put = [&v](const wchar_t *section, const wchar_t *key, std::wstring value) {
+        v.push_back({section, key, std::move(value)});
+    };
+    const auto flag = [](bool on) { return std::wstring(on ? L"1" : L"0"); };
+    const auto number = [](double d) {
+        wchar_t text[32];
+        swprintf(text, 32, d == double(long(d)) ? L"%.0f" : L"%.3f", d);
+        return std::wstring(text);
+    };
+    const auto window_mode = [](const Settings &s) {
+        return s.fullscreen ? L"fullscreen" : s.borderless ? L"borderless" : L"windowed";
+    };
+    const auto path_name = [](Settings::CapturePath p) {
+        return p == Settings::CapturePath::MediaFoundation ? L"mediafoundation"
+               : p == Settings::CapturePath::DirectShow    ? L"directshow"
+                                                           : L"auto";
+    };
+    const auto dlss5_name = [](Settings::Dlss5 d) {
+        return d == Settings::Dlss5::On ? L"on" : d == Settings::Dlss5::Off ? L"off" : L"auto";
+    };
+    if (to.device != from.device) put(L"capture", L"device", to.device);
+    if (to.width != from.width || to.height != from.height || to.fps != from.fps) {
+        put(L"capture", L"width", std::to_wstring(to.width));
+        put(L"capture", L"height", std::to_wstring(to.height));
+        put(L"capture", L"fps", number(to.fps));
+    }
+    if (to.path != from.path) put(L"capture", L"path", path_name(to.path));
+    if (to.hdr != from.hdr) put(L"video", L"mode", to.hdr ? L"hdr" : L"sdr");
+    if (to.sdr_full_range != from.sdr_full_range) put(L"video", L"sdr_range", to.sdr_full_range ? L"full" : L"limited");
+    if (to.hdr_peak_nits != from.hdr_peak_nits) put(L"video", L"hdr_peak_nits", std::to_wstring(to.hdr_peak_nits));
+    if (to.scaling != from.scaling) put(L"video", L"scaling", scaling_name(to.scaling));
+    if (to.hdr_output != from.hdr_output) put(L"hdr", L"output", hdr_output_name(to.hdr_output));
+    if (to.hdr_fit_to_screen != from.hdr_fit_to_screen) put(L"hdr", L"fit_to_screen", flag(to.hdr_fit_to_screen));
+    if (to.display_peak_nits != from.display_peak_nits)
+        put(L"hdr", L"display_peak_nits", std::to_wstring(to.display_peak_nits));
+    if (to.tone_mapping != from.tone_mapping) put(L"hdr", L"tone_mapping", to.tone_mapping);
+    if (to.hdr_dynamic_peak != from.hdr_dynamic_peak) put(L"hdr", L"dynamic_peak", flag(to.hdr_dynamic_peak));
+    if (to.paper_white_nits != from.paper_white_nits)
+        put(L"hdr", L"paper_white_nits", std::to_wstring(to.paper_white_nits));
+    if (to.monitor != from.monitor) put(L"display", L"monitor", to.monitor);
+    if (to.vrr != from.vrr) put(L"display", L"vrr", vrr_setting_name(to.vrr));
+    if (to.gpu != from.gpu) put(L"display", L"gpu", to.gpu);
+    if (to.dedup != from.dedup) put(L"frames", L"dedup", flag(to.dedup));
+    if (to.dedup_threshold != from.dedup_threshold)
+        put(L"frames", L"dedup_threshold", std::to_wstring(to.dedup_threshold));
+    if (to.dedup_keepalive_ms != from.dedup_keepalive_ms)
+        put(L"frames", L"dedup_keepalive_ms", std::to_wstring(to.dedup_keepalive_ms));
+    if (to.framegen != from.framegen) put(L"framegen", L"enabled", flag(to.framegen));
+    if (to.framegen_fast != from.framegen_fast) put(L"framegen", L"quality", to.framegen_fast ? L"fast" : L"high");
+    if (to.framegen_blend != from.framegen_blend) put(L"framegen", L"method", to.framegen_blend ? L"blend" : L"motion");
+    if (to.framegen_multiplier != from.framegen_multiplier)
+        put(L"framegen", L"multiplier", std::to_wstring(to.framegen_multiplier));
+    if (to.framegen_max_hz != from.framegen_max_hz)
+        put(L"framegen", L"max_output_hz", std::to_wstring(to.framegen_max_hz));
+    if (to.framegen_show_rates != from.framegen_show_rates)
+        put(L"framegen", L"show_rates", flag(to.framegen_show_rates));
+    if (to.all_frames_when_off != from.all_frames_when_off)
+        put(L"framegen", L"all_frames_when_off", flag(to.all_frames_when_off));
+    if (to.dlss5 != from.dlss5) put(L"dlss5", L"enabled", dlss5_name(to.dlss5));
+    if (to.audio != from.audio) put(L"audio", L"enabled", flag(to.audio));
+    if (to.audio_device != from.audio_device) put(L"audio", L"device", to.audio_device);
+    if (to.volume != from.volume) put(L"audio", L"volume", std::to_wstring(to.volume));
+    if (to.boost != from.boost) put(L"audio", L"boost", std::to_wstring(to.boost));
+    if (to.audio_delay_ms != from.audio_delay_ms) put(L"audio", L"delay_ms", std::to_wstring(to.audio_delay_ms));
+    if (to.audio_min_period != from.audio_min_period)
+        put(L"audio", L"period", to.audio_min_period ? L"minimum" : L"default");
+    if (to.borderless != from.borderless || to.fullscreen != from.fullscreen)
+        put(L"window", L"mode", window_mode(to));
+    if (to.skip_black_bars != from.skip_black_bars) put(L"window", L"skip_black_bars", flag(to.skip_black_bars));
+    if (to.show_launcher != from.show_launcher) put(L"launcher", L"show", flag(to.show_launcher));
+    if (to.update_check != from.update_check) put(L"update", L"check", flag(to.update_check));
+    if (to.mpv_log != from.mpv_log) put(L"debug", L"mpv_log", flag(to.mpv_log));
+    return v;
+}
+
 bool apply_override(Settings &s, const std::wstring &assignment, std::wstring &error) {
     const size_t dot = assignment.find(L'.');
     const size_t eq = assignment.find(L'=');

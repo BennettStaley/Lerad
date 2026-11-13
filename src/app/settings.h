@@ -109,4 +109,10 @@ std::string update_settings_text(const std::string &text, const std::vector<Sett
 // update_settings_text on the file, which is replaced as a whole.
 bool save_settings(const std::wstring &path, const std::vector<SettingValue> &values);
 
+// The values of `to` that differ from `from`, as glasir.ini writes them: what
+// a UI that edits a Settings saves, so that everything the user did not
+// touch stays as it is in the file (its own spelling, or not there at all).
+// The capture's width, height and fps go together: one changed, all three.
+std::vector<SettingValue> changed_settings(const Settings &from, const Settings &to);
+
 }  // namespace glasir

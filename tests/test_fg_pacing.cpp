@@ -210,6 +210,31 @@ void words() {
     expect(cadence_text(s).text.empty(), "unknown, but the screen follows the frames: nothing to say");
 }
 
+// The menu's top line, and what Glasir.exe told the add-ons about the screen.
+void told() {
+    using glasir::overlay::picture_text;
+    using glasir::overlay::told_text;
+    expect(std::string(picture_text(false, false)) == "SDR" && std::string(picture_text(true, true)) == "HDR" &&
+               std::string(picture_text(true, false)) == "HDR to SDR",
+           "the picture: SDR, HDR, or an HDR capture tone mapped to SDR");
+    expect(told_text("1 (PA279CDV)", 120, "off", false) ==
+               "Screen 1 (PA279CDV), 120 Hz. Variable refresh: off, as Glasir found it.",
+           "the screen and VRR as found");
+    expect(told_text("2 (Odyssey G95SC)", 239.76, "on", true) ==
+               "Screen 2 (Odyssey G95SC), 240 Hz. Variable refresh: on, as glasir.ini says (display.vrr).",
+           "VRR as glasir.ini says");
+    expect(told_text("1", 60, "unknown", false) ==
+               "Screen 1, 60 Hz. Variable refresh: not known (display.vrr in glasir.ini can say).",
+           "VRR not known");
+    expect(told_text("", 0, "", false).empty(), "nothing told: nothing said");
+    // The limit both the add-on and Glasir.exe's advice go by.
+    using fg::pacing::output_limit;
+    expect(output_limit(120, 0).hz == 120 && !output_limit(120, 0).exact, "no limit set: the screen's rate");
+    expect(output_limit(120, 100).hz == 100 && output_limit(120, 100).exact, "a limit below it: kept exactly");
+    expect(output_limit(120, 240).hz == 120 && !output_limit(120, 240).exact, "a limit above it: no limit");
+    expect(output_limit(0, 0).hz == 60, "an unknown screen: 60");
+}
+
 }  // namespace
 
 int main() {
@@ -219,6 +244,7 @@ int main() {
     spacing();
     verdicts();
     words();
+    told();
     std::printf("%d failure(s)\n", g_failures);
     return g_failures ? 1 : 0;
 }

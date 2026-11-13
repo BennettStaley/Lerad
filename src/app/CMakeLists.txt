@@ -11,6 +11,7 @@ add_library(glasir_app_core STATIC
     gpu.cpp
     hdr.cpp
     http.cpp
+    launcher_text.cpp
     mpv_launch.cpp
     reshade_config.cpp
     settings.cpp
@@ -19,6 +20,9 @@ add_library(glasir_app_core STATIC
     vrr.cpp)
 glasir_component(glasir_app_core)
 target_include_directories(glasir_app_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
+# The frame generation add-on's pacing rules (a header): advice.cpp asks them
+# what will be shown rather than repeating them.
+target_include_directories(glasir_app_core PRIVATE "${PROJECT_SOURCE_DIR}/src/framegen")
 target_link_libraries(glasir_app_core PUBLIC glasir_capture glasir_common glasir_version dxgi cfgmgr32 winhttp bcrypt wintrust crypt32 version user32 ole32)
 
 configure_file(glasir.rc.in "${CMAKE_CURRENT_BINARY_DIR}/glasir.rc" @ONLY)

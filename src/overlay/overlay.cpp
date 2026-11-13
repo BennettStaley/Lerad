@@ -60,6 +60,10 @@ struct Overlay {
     int hdr_peak_nits = 0;
     bool hdr_dynamic_peak = false;
     bool show_rates = false;  // the frame rate readout in the corner
+    // The screen Glasir.exe plays on and its variable refresh, as told.
+    std::string display_name, display_vrr;
+    bool display_vrr_set = false;
+    double display_hz = 0;
     // Frames the menu was drawn on since it opened: mpv's presents, and the
     // real frames frame generation presents itself.
     unsigned on_mpv = 0, on_real = 0;
@@ -155,6 +159,10 @@ bool init(ID3D11Device *device) {
     g.hdr_why = environment(L"GLASIR_HDR_WHY");
     g.hdr_peak_nits = std::atoi(environment(L"GLASIR_HDR_PEAK_NITS").c_str());
     g.hdr_dynamic_peak = environment(L"GLASIR_HDR_DYNAMIC_PEAK") == "1";
+    g.display_name = environment(L"GLASIR_DISPLAY_NAME");
+    g.display_vrr = environment(L"GLASIR_DISPLAY_VRR");
+    g.display_vrr_set = environment(L"GLASIR_DISPLAY_VRR_SET") == "1";
+    g.display_hz = std::atof(environment(L"GLASIR_DISPLAY_HZ").c_str());
     char ready[96];
     snprintf(ready, sizeof(ready), "Glasir menu: ready (white in HDR: %.0f nits)", g.paper_nits);
     reshade::log::message(reshade::log::level::info, ready);
@@ -249,6 +257,10 @@ void build_and_draw(ID3D11DeviceContext *context, ID3D11Texture2D *back_buffer, 
         frame.hdr_peak_nits = g.hdr_peak_nits;
         frame.hdr_dynamic_peak = g.hdr_dynamic_peak;
         frame.borderless = g.borderless;
+        frame.display_name = g.display_name;
+        frame.display_vrr = g.display_vrr;
+        frame.display_vrr_set = g.display_vrr_set;
+        frame.display_hz = g.display_hz;
         frame.scale = scale;
         frame.show_rates = &g.show_rates;
         keep = draw_menu(frame);

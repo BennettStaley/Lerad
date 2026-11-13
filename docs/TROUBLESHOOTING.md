@@ -6,6 +6,39 @@ the zip from `Bug reports\` to an
 [issue](https://github.com/Abhito/Glasir/issues) (see the README's
 "Something wrong?").
 
+## What should the console be set to?
+
+Glasir's window says it under **Set your console to**, for the capture mode
+and picture you chose, and `Glasir.exe --system` prints the same with the
+reasons. The console cannot work it out: it only sees the capture card.
+
+- **Resolution**: the size Glasir captures (2160p for a 3840x2160 mode).
+- **HDR**: on for an HDR capture, off for an SDR one. The wrong way round
+  looks grey and washed out, or far too dark.
+- **120 Hz output**: off, unless you chose a 120 fps capture mode.
+- **VRR**: off. The card needs a steady rate. VRR is used on the PC's
+  screen, where frame generation shows each frame at its moment.
+- **HDR calibration**: when Glasir sends HDR on as the console sends it (the
+  default), run the console's HDR calibration once while playing through
+  Glasir, so it is set for the screen you play on. With "Fit highlights to
+  this screen" on, Glasir does the fitting and the hint is not shown.
+
+## The window offers less than I expected
+
+- **x3 or x4 is greyed out**: the line under "Up to" on the Frame generation
+  tab says why. On a screen without VRR at 120 Hz, a 30 fps game at x3 would
+  be 90 fps, which does not fall on whole refreshes, so x2 is used; x4
+  (120 fps) does. A 60 Hz screen has room for x2 of a 30 fps game only.
+- **HDR is greyed out**: the card has no 10-bit mode.
+- **The HDR tab is greyed out**: the capture is SDR (Picture, on the Play
+  tab).
+- **VRR shows "on or off: not known"**: with an AMD or Intel GPU Glasir can
+  read what the screen can do, not whether it is switched on. Say so under
+  "VRR is" on the Frame generation tab.
+- **A screen is missing or shows the wrong HDR or VRR state**: the window
+  reads the screens again when you come back to it from Windows' or the
+  GPU's settings. `Glasir.exe --system` says how each fact was found.
+
 ## Frame generation does not double the frame rate
 
 Open the menu (`Tab`). Its top line shows what the card delivers, what is
@@ -76,7 +109,11 @@ says when yours makes them uneven.
   short and long.
 - **A screen without VRR whose rate is a multiple of the result** (60 or
   120 fps on 120 or 240 Hz): frames land on whole refreshes; mostly even,
-  with an occasional short and long pair.
+  with an occasional short and long pair. Measured on a 120 Hz screen
+  without VRR at 3840x2160: 30 → 60 fps held two refreshes for about nine
+  frames in ten, and 30 → 120 fps (x4) one refresh for about nine in ten,
+  with around 103 of the 120 frames shown, as nothing is left over when the
+  result fills the screen's rate.
 - **A screen without VRR whose rate is not a multiple** (120 fps on 144 or
   165 Hz): "Uneven on this screen: 120 fps does not divide 144 Hz". Set the
   screen to the rate the menu names (120 Hz) in Windows' display settings,
@@ -227,7 +264,13 @@ button in Glasir's window, or `Glasir.exe --setup`.
 On RTX 30 and 40 series GPUs DLSS 5 takes more GPU time than on an RTX 50
 (about 1.5 times as much on an RTX 4070 SUPER as on an RTX 5070 Ti). If the
 picture stutters with it on, turn it off in the menu (Tab) or with the
-launcher's checkbox; both keep it off. F6 turns it off until Glasir closes.
+checkbox in Glasir's window; both keep it off. F6 turns it off until Glasir
+closes.
+
+DLSS 5 is judged for the GPU that draws (**GPU** in Glasir's window). On a
+laptop whose screen is on the integrated GPU, the window offers the RTX GPU
+under Screen, with what that costs: each frame is then copied between the
+two.
 
 ## Glasir closed by itself
 

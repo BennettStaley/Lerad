@@ -132,7 +132,10 @@ std::string status_line(const MenuFrame &f, const MpvState &mpv) {
         std::snprintf(text, sizeof(text), "%dx%d", mpv.width, mpv.height);
         add(text);
     }
-    add(f.source_hdr ? "HDR" : "SDR");
+    // An HDR capture tone mapped to SDR says so: mpv's output when it has a
+    // picture, else what Glasir decided at the start.
+    const bool output_hdr = !mpv.out_gamma.empty() ? mpv.out_gamma == "pq" : f.hdr_output != "sdr";
+    add(picture_text(f.source_hdr, output_hdr));
     if (f.host && f.host->framegen_status) {
         const FramegenStatus st = f.host->framegen_status();
         add(rates_text(st));
@@ -372,6 +375,10 @@ void display(const MenuFrame &f, const MpvState &mpv) {
         f.mpv->command({"script-message", "glasir-window", choice == 1 ? "borderless" : "windowed"});
         save(f, "window", "mode", choice == 1 ? "borderless" : "windowed");
     }
+    // Which screen Glasir.exe chose and what it took its variable refresh to
+    // be: frame generation paces by that, so a wrong word shows here.
+    const std::string told = told_text(f.display_name, f.display_hz, f.display_vrr, f.display_vrr_set);
+    if (!told.empty()) note(told.c_str());
     const bool hdr = f.source_hdr;
     if (!hdr && !f.hdr_available) return;  // a card without HDR modes: nothing to switch to
     if (hdr) hdr_controls(f, mpv, ImGui::GetTime());

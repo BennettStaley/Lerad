@@ -6,6 +6,7 @@
 #include <format>
 #include <optional>
 
+#include "fg_pacing.h"
 #include "log.h"
 
 namespace glasir {
@@ -46,6 +47,8 @@ std::wstring current(const Settings &s, const SettingValue &v) {
     if (name == L"video.scaling") return scaling_name(s.scaling);
     if (name == L"framegen.quality") return s.framegen_fast ? L"fast" : L"high";
     if (name == L"framegen.method") return s.framegen_blend ? L"blend" : L"motion";
+    if (name == L"framegen.multiplier") return std::to_wstring(s.framegen_multiplier);
+    if (name == L"framegen.max_output_hz") return std::to_wstring(s.framegen_max_hz);
     if (name == L"frames.dedup") return s.dedup ? L"1" : L"0";
     if (name == L"display.gpu") return s.gpu;
     if (name == L"display.vrr") return vrr_setting_name(s.vrr);
@@ -59,6 +62,7 @@ std::vector<SettingValue> capture_settings(const VideoMode &m) {
 }
 
 int severity_rank(const AdviceItem &i) {
+    if (i.kind == AdviceKind::Console) return 4;
     if (i.kind == AdviceKind::Recommendation && i.severity == AdviceSeverity::Info) return 3;
     return i.severity == AdviceSeverity::Problem ? 0 : i.severity == AdviceSeverity::Warning ? 1 : 2;
 }
@@ -243,16 +247,42 @@ Advice advise(const AdviceInput &in) {
     // ------------------------------------------------------------ frame rates
     const double capture_fps = mode ? mode->fps : 60.0;
     const double refresh = d.found ? d.refresh_hz : 0;
-    // As the frame generation add-on decides (src/framegen): doubling needs
-    // twice the game's rate to fit the screen, with 5 % to spare.
-    o.max_shown_hz = s.framegen_max_hz > 0 ? s.framegen_max_hz : std::round(refresh);
+    // Variable refresh as the add-ons are told it (glasir.ini's display.vrr,
+    // else as found): frame generation's choices below go by the same word.
+    const int vrr_user = s.vrr == Settings::Vrr::On ? 1 : s.vrr == Settings::Vrr::Off ? 0 : -1;
+    o.vrr = vrr_for_addons(d.found ? d.vrr : Vrr::Unknown, vrr_user);
+    const fg::pacing::Vrr pacing_vrr = o.vrr == L"on"    ? fg::pacing::Vrr::On
+                                       : o.vrr == L"off" ? fg::pacing::Vrr::Off
+                                                         : fg::pacing::Vrr::Unknown;
+    // As the frame generation add-on decides (src/framegen/fg_pacing.h, asked
+    // here with the same numbers): the most frames per game frame that fit
+    // the screen's rate (with 5 % to spare) or framegen.max_output_hz (kept
+    // exactly, when it is below the screen's rate), up to framegen.multiplier;
+    // on a screen known to refresh at a fixed rate, a smaller multiplier that
+    // falls on whole refreshes before a larger one that does not.
+    const fg::pacing::Limit output_limit = fg::pacing::output_limit(refresh, s.framegen_max_hz);
+    o.max_shown_hz = refresh > 0 ? output_limit.hz : 0;
+    o.capped = refresh > 0 && output_limit.exact;
+    o.multiplier_wanted = std::clamp(s.framegen_multiplier, 2, fg::pacing::kMaxMultiplier);
     o.framegen = s.framegen && s.dedup && in.reshade_installed && o.media_foundation;
     for (double game : {30.0, 60.0, 120.0}) {
         if (game > capture_fps + 1 && game != 30.0) continue;
         ShownRate r;
         r.game_fps = std::min(game, capture_fps);
-        r.doubled = o.framegen && o.max_shown_hz > 0 && 2 * r.game_fps <= o.max_shown_hz * 1.05;
-        r.shown_fps = r.doubled ? 2 * r.game_fps : refresh > 0 ? std::min(r.game_fps, refresh) : r.game_fps;
+        if (o.framegen && o.max_shown_hz > 0) {
+            fg::pacing::MultiplierGate gate;  // a fresh one: no memory of another rate
+            r.multiplier = gate.choose(0, r.game_fps, o.multiplier_wanted, output_limit, pacing_vrr, refresh);
+            for (int k = r.multiplier + 1; k <= o.multiplier_wanted; ++k)
+                r.kept_even = r.kept_even || fg::pacing::fits(k * r.game_fps, output_limit, false);
+        }
+        if (r.multiplier > 1) {
+            r.shown_fps = r.multiplier * r.game_fps;
+            const fg::pacing::Verdict v = fg::pacing::judge_cadence(r.shown_fps, refresh, pacing_vrr);
+            r.cadence = v.cadence;
+            r.better_hz = v.better_hz;
+        } else {
+            r.shown_fps = refresh > 0 ? std::min(r.game_fps, refresh) : r.game_fps;
+        }
         if (o.shown.empty() || o.shown.back().game_fps != r.game_fps) o.shown.push_back(r);
     }
     if (s.framegen && !s.dedup)
@@ -269,28 +299,78 @@ Advice advise(const AdviceInput &in) {
         // refresh-unknown
         limit("refresh-unknown", Sev::Info,
               L"The screen's refresh rate could not be read: frame generation finds it while playing.");
+    if (s.framegen && s.framegen_max_hz > 0 && refresh > 0 && !o.capped)
+        // framegen-cap-no-effect: a limit that is not below the screen's rate.
+        limit("framegen-cap-no-effect", Sev::Info,
+              std::format(L"framegen.max_output_hz = {} is not below this screen's {:.0f} Hz, so it changes nothing. "
+                          L"0 means the same.",
+                          s.framegen_max_hz, refresh),
+              {{L"framegen", L"max_output_hz", L"0"}});
     if (o.framegen && o.max_shown_hz > 0) {
-        const bool capped = s.framegen_max_hz > 0 && s.framegen_max_hz < std::round(refresh);
-        const std::wstring why = capped ? std::format(L"framegen.max_output_hz is {}", s.framegen_max_hz)
-                                        : L"The screen is " + number(o.max_shown_hz) + L" Hz";
-        bool none = true, sixty = true;  // sixty: a 60 fps game is doubled (or cannot be captured)
+        const std::wstring hz = std::format(L"{:.0f} Hz", refresh);
+        const std::wstring why = o.capped ? std::format(L"framegen.max_output_hz is {}", s.framegen_max_hz)
+                                          : L"The screen is " + hz;
+        const ShownRate *thirty = nullptr;
+        bool none = true, sixty = true;  // sixty: a 60 fps game gets frames added (or cannot be captured)
         for (const ShownRate &r : o.shown) {
-            if (r.doubled) none = false;
+            if (r.multiplier > 1) none = false;
             else if (std::fabs(r.game_fps - 60) < 1.5) sixty = false;
+            if (r.game_fps < 31) thirty = &r;
         }
         if (none)
             // framegen-nothing-doubled: not even 30 fps fits twice.
             limit("framegen-nothing-doubled", Sev::Warning,
-                  why + L": frame generation has no room to double anything (30 fps needs 60 Hz).");
+                  why + L": frame generation has no room to add a frame to anything (a 30 fps game needs 60 Hz).");
         else if (!sixty)
-            // screen-60hz: 60 fps games are not doubled.
+            // screen-60hz: 60 fps games get no frames added.
             limit("screen-60hz", Sev::Info,
-                  why + L": 60 fps games are not doubled (that needs 120 Hz); 30 fps games are, to 60.");
+                  why + L": 60 fps games get no frames added (that needs 120 Hz); 30 fps games are shown at " +
+                      number(thirty ? thirty->shown_fps : 60.0) + L".");
+        std::wstring fewer, uneven, ceiling;
+        int better_hz = 0;
+        for (const ShownRate &r : o.shown) {
+            if (r.multiplier < 2) continue;
+            const std::wstring rate = L"a " + number(r.game_fps) + L" fps game";
+            if (r.multiplier < o.multiplier_wanted)
+                fewer += (fewer.empty() ? L"" : L"; ") + rate +
+                         std::format(L" gets x{} ({} fps), as ", r.multiplier, number(r.shown_fps)) +
+                         (r.kept_even ? L"more would not fall on whole refreshes of this fixed " + hz + L" screen"
+                          : o.capped  ? std::format(L"more is over framegen.max_output_hz = {}", s.framegen_max_hz)
+                                      : L"more is over what this " + hz + L" screen shows");
+            if (r.cadence == FramegenStatus::Cadence::FixedUneven) {
+                uneven += (uneven.empty() ? L"" : L", ") + rate + L" at " + number(r.shown_fps) + L" fps";
+                if (r.better_hz > 0 && (better_hz == 0 || r.better_hz == better_hz)) better_hz = r.better_hz;
+                else better_hz = -1;  // no one rate suits them all
+            }
+            if (r.cadence == FramegenStatus::Cadence::VrrCeiling)
+                ceiling += (ceiling.empty() ? L"" : L", ") + rate + L" at " + number(r.shown_fps) + L" fps";
+        }
+        if (!fewer.empty()) {
+            // framegen-fewer-fit: more than x2 was asked for, and less is used.
+            fewer[0] = L'A';
+            limit("framegen-fewer-fit", Sev::Info,
+                  std::format(L"Up to x{} is asked for (framegen.multiplier). ", o.multiplier_wanted) + fewer + L".");
+        }
+        if (!uneven.empty()) {
+            // framegen-uneven: a fixed refresh rate the output does not divide.
+            uneven[0] = L'A';
+            limit("framegen-uneven", Sev::Info,
+                  uneven + L" does not divide this screen's fixed " + hz +
+                      L": some frames stay a refresh longer than others. " +
+                      (better_hz > 0 ? std::format(L"Setting the screen to {} Hz, or variable refresh, makes it even.",
+                                                   better_hz)
+                                     : std::wstring(L"Variable refresh makes it even.")));
+        }
+        if (!ceiling.empty()) {
+            // framegen-vrr-ceiling: the output fills the screen's rate.
+            ceiling[0] = L'A';
+            limit("framegen-vrr-ceiling", Sev::Info,
+                  ceiling + L" fills this " + hz +
+                      L" screen: variable refresh has no room left there, so frames follow the screen's refreshes.");
+        }
     }
 
     // ------------------------------------------------------------ variable refresh
-    const int vrr_user = s.vrr == Settings::Vrr::On ? 1 : s.vrr == Settings::Vrr::Off ? 0 : -1;
-    o.vrr = vrr_for_addons(d.found ? d.vrr : Vrr::Unknown, vrr_user);
     const bool nvidia_screen = d.gpu_vendor == kVendorNvidia;
     const std::wstring kind = d.vrr_kind.empty() ? L"variable refresh" : d.vrr_kind;
     const std::wstring range = d.vrr_min_hz > 0 && d.vrr_max_hz > 0
@@ -338,24 +418,37 @@ Advice advise(const AdviceInput &in) {
 
     // ------------------------------------------------------------ HDR
     if (s.hdr) {
-        const bool to_screen = s.hdr_output == Settings::HdrOutput::Hdr ||
-                               (s.hdr_output == Settings::HdrOutput::Auto && d.found && d.hdr_on);
-        o.hdr = to_screen ? Outcome::Hdr::Hdr : Outcome::Hdr::ToneMapped;
-        if (s.hdr_output == Settings::HdrOutput::Hdr && d.found && !d.hdr_on)
+        // What is done with it is hdr.h's to decide (mpv's options come from
+        // the same plan).
+        const HdrPlan &plan = o.hdr_plan = hdr_plan(s, d);
+        o.hdr = plan.output == HdrPlan::Output::Hdr ? Outcome::Hdr::Hdr : Outcome::Hdr::ToneMapped;
+        if (plan.forced_without_hdr && d.found)
             // hdr-forced: HDR sent to a screen that is not in HDR.
             limit("hdr-forced", Sev::Warning,
                   std::wstring(L"hdr.output = hdr, but ") +
                       (d.hdr_supported ? L"HDR is off in Windows for this screen" : L"this screen has no HDR") +
                       L": the picture will look washed out. \"auto\" tone maps it to SDR instead.");
-        else if (s.hdr_output == Settings::HdrOutput::Auto && d.found && !d.hdr_on && d.hdr_supported)
+        else if (plan.reason == HdrPlan::Reason::HdrOff)
             // hdr-off-in-windows
             limit("hdr-off-in-windows", Sev::Warning,
                   L"HDR is off in Windows for this screen: the HDR capture is tone mapped to SDR. Turn on \"Use "
                   L"HDR\" in Windows' display settings (Win+Alt+B) to see it in HDR.");
-        else if (s.hdr_output == Settings::HdrOutput::Auto && d.found && !d.hdr_supported)
+        else if (plan.reason == HdrPlan::Reason::NoHdr)
             // hdr-no-screen
             limit("hdr-no-screen", Sev::Info,
                   L"This screen has no HDR: the HDR capture is tone mapped to SDR.");
+        if (plan.output == HdrPlan::Output::Hdr && s.hdr_fit_to_screen && !plan.fit)
+            // hdr-fit-no-peak: nothing to fit to.
+            limit("hdr-fit-no-peak", Sev::Warning,
+                  L"hdr.fit_to_screen = 1, but this screen reports no peak brightness to Windows and "
+                  L"hdr.display_peak_nits is 0: the picture goes out as the console sends it. Set "
+                  L"hdr.display_peak_nits to the screen's peak.");
+        else if (plan.fit && plan.peak_reported)
+            // hdr-fit-reported-peak: fitted to the screen's own word.
+            limit("hdr-fit-reported-peak", Sev::Info,
+                  std::format(L"The picture is fitted to the {} nits this screen reports to Windows, which is often "
+                              L"too low. If you know its real peak, set hdr.display_peak_nits.",
+                              plan.peak_nits));
     }
 
     // ------------------------------------------------------------ the GPU
@@ -441,6 +534,16 @@ Advice advise(const AdviceInput &in) {
                                          : L"Fast takes about half the GPU time" + guess + L".")
                                   : L"This GPU has room for the cleaner one" + guess + L"."),
                   {{L"framegen", L"quality", fast ? L"fast" : L"high"}});
+        // rec-framegen-multiplier: only said when more than x2 is asked of a
+        // GPU that has little to spare; x3 and x4 stay the user's choice.
+        if (s.framegen && o.multiplier_wanted > 2 &&
+            (o.gpu_class == GpuClass::Low || (o.gpu_class == GpuClass::Mid && o.dlss5)))
+            recommend("rec-framegen-multiplier",
+                      std::format(L"Frame generation: up to x2. Every frame in between is a whole pass on the GPU, and "
+                                  L"x{} makes {} of them per game frame",
+                                  o.multiplier_wanted, o.multiplier_wanted - 1) +
+                          guess + L".",
+                      {{L"framegen", L"multiplier", L"2"}});
         // rec-framegen-method: blend only for a small GPU drawing more than 1440p.
         const bool blend = o.gpu_class == GpuClass::Low && d.found && INT64(d.width) * d.height > 2560 * 1440 + 1 &&
                            o.picture_height > 1440;
@@ -451,6 +554,50 @@ Advice advise(const AdviceInput &in) {
                              : std::wstring(L"The frame in between follows what moves; blend (a plain mix) is only "
                                             L"for a GPU that cannot keep up.")),
                   {{L"framegen", L"method", blend ? L"blend" : L"motion"}});
+    }
+
+    // ------------------------------------------------------------ the console
+    // What the console should be set to for the capture chosen above. Named
+    // generically; a console's own name for a setting only where it is known.
+    {
+        auto console = [&](const char *id, std::wstring brief, std::wstring text) {
+            add(id, AdviceKind::Console, Sev::Info, std::move(text));
+            a.items.back().brief = std::move(brief);
+        };
+        if (mode) {
+            // console-resolution: the size the card is asked for.
+            const std::wstring lines = std::format(L"{}p", mode->height);
+            console("console-resolution", lines,
+                    L"Video output resolution: " + lines + L" (" + size_text(*mode) +
+                        L"), the size Glasir captures. Another size is scaled by the console or the card first.");
+        }
+        // console-hdr: as video.mode.
+        if (s.hdr)
+            console("console-hdr", L"HDR on",
+                    L"HDR: on (PS5: \"On When Supported\" or \"Always On\"; Xbox: \"Allow HDR10\"). Glasir captures "
+                    L"in HDR (video.mode = hdr); an SDR signal would look wrong.");
+        else
+            console("console-hdr", L"HDR off",
+                    L"HDR: off. Glasir captures in SDR (video.mode = sdr); an HDR signal would look grey and washed "
+                    L"out.");
+        if (mode) {
+            // console-120hz: only for a capture mode of 120 fps.
+            const bool fast = mode->fps >= 100;
+            console("console-120hz", fast ? L"120 Hz output on" : L"120 Hz output off",
+                    fast ? L"120 Hz output: on. The capture runs at " + number(mode->fps) + L" fps."
+                         : L"120 Hz output: off. The capture runs at " + number(mode->fps) +
+                               L" fps, so a faster signal would lose frames; frame generation adds frames on the PC.");
+        }
+        // console-vrr: the card needs a steady rate.
+        console("console-vrr", L"VRR off",
+                L"VRR: off. The capture card needs a steady rate; variable refresh belongs on the PC's screen, where "
+                L"frame generation uses it.");
+        // console-hdr-calibration: HDR passed through as the console sends it.
+        if (s.hdr && o.hdr == Outcome::Hdr::Hdr && !o.hdr_plan.fit)
+            console("console-hdr-calibration", L"",
+                    L"Run the console's HDR calibration once while playing through Glasir (PS5: \"Adjust HDR\"; "
+                    L"Xbox: \"Calibrate HDR for games\"): the picture goes to this screen as the console sends it, "
+                    L"so that is what fits it to the screen.");
     }
 
     std::stable_sort(a.items.begin(), a.items.end(),
@@ -477,21 +624,25 @@ std::wstring advice_text(const Advice &advice) {
     t += L"  Shown:";
     for (size_t i = 0; i < o.shown.size(); ++i)
         t += std::format(L"{} a {} fps game at {} fps{}", i ? L"," : L"", number(o.shown[i].game_fps),
-                         number(o.shown[i].shown_fps), o.shown[i].doubled ? L" (doubled)" : L"");
-    t += o.framegen ? std::format(L"; frame generation up to {} Hz\n", number(o.max_shown_hz))
+                         number(o.shown[i].shown_fps),
+                         o.shown[i].multiplier > 1 ? std::format(L" (x{})", o.shown[i].multiplier) : std::wstring());
+    t += o.framegen ? std::format(L"; frame generation up to x{}, at most {} frames a second{}\n",
+                                  o.multiplier_wanted, number(o.max_shown_hz),
+                                  o.capped ? L" (framegen.max_output_hz)" : L" (the screen's rate)")
                     : std::wstring(L"; frame generation off\n");
-    t += std::wstring(L"  HDR: ") +
-         (o.hdr == Outcome::Hdr::Hdr ? L"the HDR capture goes to the screen as HDR"
-          : o.hdr == Outcome::Hdr::ToneMapped ? L"the HDR capture is tone mapped to SDR"
-                                              : L"an SDR capture") +
+    t += L"  HDR: " + (o.hdr == Outcome::Hdr::SdrCapture ? std::wstring(L"an SDR capture") : hdr_plan_text(o.hdr_plan)) +
          L"\n";
     t += L"  Variable refresh, as frame generation is told: " + o.vrr + L"\n";
     t += std::wstring(L"  DLSS 5: ") + (o.dlss5 ? L"on" : L"off") + L"\n";
     if (o.picture_height > 0)
         t += std::format(L"  Picture: {}x{} on the screen{}\n", o.picture_width, o.picture_height,
                          o.upscaled ? L", scaled up from the capture" : L"");
-    std::wstring limits, recommended;
+    std::wstring limits, recommended, console;
     for (const AdviceItem &i : advice.items) {
+        if (i.kind == AdviceKind::Console) {
+            console += L"  " + i.text + L" (" + widen(i.id) + L")\n";
+            continue;
+        }
         std::wstring line = L"  ";
         if (i.kind == AdviceKind::Limit)
             line += i.severity == AdviceSeverity::Problem   ? L"[problem] "
@@ -507,6 +658,7 @@ std::wstring advice_text(const Advice &advice) {
     }
     if (!limits.empty()) t += L"Limits:\n" + limits;
     if (!recommended.empty()) t += L"Recommended:\n" + recommended;
+    if (!console.empty()) t += L"Set your console to:\n" + console;
     return t;
 }
 

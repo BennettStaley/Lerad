@@ -633,7 +633,10 @@ enum class SetupResult { Play, Stop, Failed };
 SetupResult setup(const Args &args, const std::wstring &dir, const std::wstring &engine) {
     const bool need = !component_installed(engine, Component::Mpv) || !component_installed(engine, Component::ReShade);
     if (!args.setup && !need) return SetupResult::Play;
-    const bool dlss5_default = component_installed(engine, Component::Dlss5) || dlss5_gpu(display_gpu());
+    // DLSS 5 is offered when any GPU of this PC can run it, whichever screen
+    // Glasir plays on (display.gpu can put mpv on it).
+    bool dlss5_default = component_installed(engine, Component::Dlss5);
+    for (const GpuInfo &g : list_gpus()) dlss5_default = dlss5_default || dlss5_gpu(g);
     std::vector<Component> which;
     if (!args.dialogs) {
         // Nothing is downloaded unasked when no one can be asked.
@@ -956,6 +959,14 @@ int run(const Args &args, bool again, bool &stuck, bool &restart) {
             vrr_for_addons(d.vrr, s.vrr == Settings::Vrr::On ? 1 : s.vrr == Settings::Vrr::Off ? 0 : -1);
         SetEnvironmentVariableW(L"GLASIR_DISPLAY_VRR", vrr);
         SetEnvironmentVariableW(L"GLASIR_DISPLAY_HZ", std::format(L"{:.3f}", d.refresh_hz).c_str());
+        // For the menu: which screen that is ("1 (PA279CDV)"), and whether
+        // the VRR state is the user's word (display.vrr) or what was found.
+        std::wstring screen;
+        if (d.found)
+            screen = (d.number > 0 ? std::to_wstring(d.number) : d.device) +
+                     (d.name.empty() ? std::wstring() : L" (" + d.name + L")");
+        SetEnvironmentVariableW(L"GLASIR_DISPLAY_NAME", screen.c_str());
+        SetEnvironmentVariableW(L"GLASIR_DISPLAY_VRR_SET", s.vrr == Settings::Vrr::Auto ? L"0" : L"1");
         // HDR (hdr.h): the menu's white, and what is done with an HDR capture.
         for (const auto &[name, value] : hdr_environment(s, d)) SetEnvironmentVariableW(name.c_str(), value.c_str());
         if (s.hdr) log(L"HDR: {}", hdr_plan_text(hdr_plan(s, d)));

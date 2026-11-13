@@ -163,6 +163,16 @@ inline bool fits(double fps, Limit limit, bool staying) {
     return fps <= limit.hz * room;
 }
 
+// The most frames a second that may be shown on a `display_hz` screen with
+// [framegen] max_output_hz: the user's limit when it is below the screen's
+// rate (kept exactly), else the screen's own (60 when it is not known). A
+// limit at or above the screen's rate changes nothing.
+inline Limit output_limit(double display_hz, int max_output_hz) {
+    const double screen = display_hz > 0 ? display_hz : 60.0;
+    if (max_output_hz > 0 && max_output_hz < screen) return {double(max_output_hz), true};
+    return {screen, false};
+}
+
 // Whether `fps` frames a second fall on whole refreshes of a `hz` screen.
 inline bool divides(double fps, double hz) {
     if (fps <= 0 || hz <= 0) return false;

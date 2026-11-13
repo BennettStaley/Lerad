@@ -603,6 +603,32 @@ does to the pacing".
   follows the frames (if it does not, the warning would be shown wrongly
   there; it changes no pacing).
 
+- **A fixed 120 Hz screen, measured (11-12, later the same day):** the
+  second screen of the same PC, 3840x2160 at 120 Hz with VRR not offered by
+  the driver, a synthetic 3840x2160 P010 source at 30 fps, borderless, not
+  focused, composed (PresentMon: "Composed: Flip", sync interval 1).
+  - 30 → 60: 2 and 2 refreshes for 88-94 % of the pairs (95 % of frames on
+    2 refreshes), 57-58 frames shown a second; the rest are frames left out
+    as "queue full" (a 4 and 4 pair) and a few 3 and 2. The 5 and 3 pattern
+    of the 240 Hz screen does not show: a refresh is 8.3 ms here, and being
+    a few milliseconds late still lands on the refresh meant.
+  - 30 → 120 (x4): one refresh for 90 % of frames, about 103 of 120 shown a
+    second. Every frame needs its own refresh, so each one left out as
+    "queue full" (12-54 in 5 s) is a doubled refresh. No lead would help:
+    there is no spare refresh to move into.
+  - x3 asked for: the gate stays at x2 (90 fps does not divide 120 Hz).
+  - So on a fixed 120 Hz screen the flaw above does not matter for
+    30 → 60; it is specific to screens where a frame should stay four or
+    more refreshes.
+- **`SyncRefreshCount` counts the wrong screen there:** on that 120 Hz
+  screen the add-on's log read "seen refreshing at 240.0", the rate of the
+  PC's other (main, 240 Hz) screen. For a composed window the count
+  follows Windows' compositor, not the screen the window is on.
+  `judge_refresh` calls 240 on a 120 Hz screen Unknown, so nothing wrong is
+  shown, but "VRR is not engaging" can then never be shown on a screen
+  slower than the fastest one. Not fixed: needs the output's own count
+  (`IDXGIOutput::GetFrameStatistics`) and a focused VRR window to test on.
+
 ### 11.4 The numbers shown
 
 - The menu's old line came from the 5 s log window and showed twice the

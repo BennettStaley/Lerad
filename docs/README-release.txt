@@ -7,12 +7,19 @@ GETTING STARTED
    C:\Games\Glasir. Not "Program Files": Glasir keeps its settings, logs
    and screenshots in its own folder.
 2. Plug in your capture card and turn the console on.
-3. Start Glasir.exe, pick your card and what you want in its window, and
-   press Play. The first time, it asks to download the programs it runs on
+3. Start Glasir.exe. In its window, pick your card, SDR or HDR, and the
+   screen to play on. "What you will get" says what your choices come to
+   on this PC, and "Set your console to" what to set on the console for
+   them (resolution, HDR, 120 Hz output, VRR off). The HDR, Frame
+   generation and Sound and window tabs hold the rest.
+4. Press Play. The first time, it asks to download the programs it runs on
    (mpv and ReShade, plus DLSS 5 on an NVIDIA RTX 30, 40 or 50 series GPU).
    They come straight from their authors' sites; THIRD-PARTY-NOTICES.md lists
    them and their licences.
-4. While playing, Tab opens the menu.
+5. While playing, Tab opens the menu.
+
+"Glasir.exe --system" prints what Glasir found on the PC and what your
+settings will do there.
 
 Settings are in glasir.ini (written on the first start, every setting
 explained). Volume, boost and audio delay you change while playing are kept

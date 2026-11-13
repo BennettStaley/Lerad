@@ -129,9 +129,32 @@ command line.
 
 ## 🎮 Using it
 
-`Glasir.exe` opens its window first: pick the capture card and its mode,
-SDR or HDR, DLSS 5, frame generation, the sound and the window mode, then
-press **Play**.
+`Glasir.exe` opens its window first. On the **Play** tab, pick the capture
+card and its mode, SDR or HDR, the screen to play on, DLSS 5 and frame
+generation, then press **Play**.
+
+- **What you will get** says, as you choose, what those choices come to on
+  this PC: the capture mode, the frame rate shown ("a 30 fps game is shown
+  at 60"), what happens to HDR, and the screen with its VRR state.
+- **Set your console to** lists what to set on the console for them: the
+  output resolution, HDR on or off, 120 Hz output and VRR. A console only
+  sees the capture card, not what Glasir does, so it cannot pick these by
+  itself. VRR stays off on the console: the card needs a steady rate, and
+  VRR does its work on the PC's screen.
+- **Worth a look** shows what will not work as set, and settings that would
+  suit this PC better. **Use** takes a suggestion; nothing is shown when
+  your settings already match.
+- The other tabs hold what is needed less often. **HDR**: send an HDR
+  capture as HDR or as SDR, fit its highlights to the screen (peak, curve,
+  measuring each frame), the console's peak, and the range of an SDR
+  capture. **Frame generation**: quality, method, up to x2, x3 or x4 (with
+  what each comes to on your screen and what it costs), a limit on the
+  frames shown, the frame rate readout, and whether the screen's VRR is on
+  if Glasir cannot read it. **Sound and window**: the sound input and the
+  window mode.
+- A choice that cannot work here is greyed out and says why (HDR on a card
+  without a 10-bit mode, x3 on a fixed 120 Hz screen, DLSS 5 on another
+  GPU).
 
 - Untick "Show this window when Glasir starts" to play at once. Hold
   **Shift** while starting Glasir to see the window again, or start it with
@@ -141,14 +164,17 @@ press **Play**.
   is saved there too.
 - The card's own audio input is found automatically. DLSS 5 turns itself on
   with an NVIDIA RTX 30, 40 or 50 series GPU (`[dlss5] enabled = auto`).
-- With more than one screen, Glasir plays on the main one. `[display]
-  monitor = 2` (or a part of the monitor's name) picks another; the capture
-  size, HDR and VRR then go by that screen. `[display] gpu` picks the GPU
-  on a PC with several.
+- With more than one screen, pick the one to play on under **Screen** (each
+  is listed with its size, refresh rate, HDR and VRR); the capture size, HDR
+  and VRR then go by that screen. Glasir's window can be on any screen. On a
+  PC with several GPUs, **GPU** picks the one that draws. In `glasir.ini`
+  these are `[display] monitor` (a number or a part of the monitor's name)
+  and `[display] gpu`.
 - `Glasir.exe --system` shows what Glasir found on your PC (GPUs, each
   screen with HDR and VRR, the capture card), what your settings will do
   there (the capture mode, the frame rate shown, HDR or tone mapped), what
-  holds it back and which settings would suit it.
+  holds it back, which settings would suit it and what to set on the
+  console: the same as the window shows, as text.
 
 ### Keys
 

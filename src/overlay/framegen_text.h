@@ -55,6 +55,32 @@ struct Line {
     bool matters = false;  // shown in the menu's warning colour
 };
 
+// "HDR", "SDR", or "HDR to SDR" for an HDR capture that is tone mapped to an
+// SDR output: what the menu's top line says about the picture.
+inline const char *picture_text(bool source_hdr, bool output_hdr) {
+    return !source_hdr ? "SDR" : output_hdr ? "HDR" : "HDR to SDR";
+}
+
+// The screen Glasir.exe was told to play on and what it took its variable
+// refresh to be, which is what frame generation paces by: "Screen 1
+// (PA279CDV), 120 Hz. Variable refresh: off, as Glasir found it." name: "1
+// (PA279CDV)", "" when not told; vrr: "on", "off" or "unknown"; set: the
+// state is glasir.ini's display.vrr, not what was found. "" when nothing was
+// told (mpv started some other way).
+inline std::string told_text(const std::string &name, double hz, const std::string &vrr, bool set) {
+    if (name.empty() && vrr.empty()) return {};
+    char rate[32] = "";
+    if (hz > 0) std::snprintf(rate, sizeof(rate), "%s%.0f Hz", name.empty() ? "" : ", ", hz);
+    std::string text = name.empty() ? std::string(hz > 0 ? "This screen: " : "") : "Screen " + name;
+    text += rate;
+    if (!text.empty() && text.back() != ' ') text += ". ";
+    if (vrr == "on" || vrr == "off")
+        text += "Variable refresh: " + vrr + (set ? ", as glasir.ini says (display.vrr)." : ", as Glasir found it.");
+    else
+        text += "Variable refresh: not known (display.vrr in glasir.ini can say).";
+    return text;
+}
+
 // Why fewer frames are added than asked for.
 inline Line reason_text(const FramegenStatus &s) {
     using Reason = FramegenStatus::Reason;
