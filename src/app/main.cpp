@@ -12,7 +12,7 @@
 //   Glasir.exe [--play] [--settings FILE] [--set section.key=value ...] [--no-dialogs]
 //   Glasir.exe --input-raw FILE|- [--raw-format nv12|p010|yuy2|uyvy] --set capture.width=W ...
 //   Glasir.exe --list
-//   Glasir.exe --system
+//   Glasir.exe --system [--settings FILE] [--set section.key=value ...]
 //   Glasir.exe --version
 //   Glasir.exe --setup [--components mpv,reshade,dlss5] [--no-dialogs]
 //   Glasir.exe --update [--no-dialogs]
@@ -56,6 +56,7 @@
 #include <vector>
 
 #include "../common/framegen_link.h"
+#include "advice.h"
 #include "audio_endpoint.h"
 #include "backdrop.h"
 #include "bug_report.h"
@@ -72,6 +73,7 @@
 #include "reshade_config.h"
 #include "settings.h"
 #include "setup_ui.h"
+#include "system_report.h"
 #include "update.h"
 
 using namespace glasir;
@@ -254,11 +256,26 @@ std::wstring device_list_text() {
     return text;
 }
 
-// --system: the GPU and the screen as Glasir sees them.
-std::wstring system_text() {
-    const GpuInfo gpu = display_gpu();
-    return L"GPU: " + (gpu.found ? gpu.name : std::wstring(L"unknown")) + L"\nDisplay: " +
-           display_text(primary_display()) + L"\n";
+std::wstring settings_file(const Args &args) {
+    return args.settings_path.empty() ? app_dir() + L"\\glasir.ini" : args.settings_path;
+}
+
+// --system and bug reports: the GPUs, every screen with HDR and VRR, the
+// capture cards in short (not while one is playing: reading a card's modes
+// opens it), and what glasir.ini (with --set) will do on this PC (advice.h).
+std::wstring system_text(const Args &args, bool cards) {
+    Settings s;
+    std::wstring error, note;
+    const std::wstring path = settings_file(args);
+    // Not load_settings on a missing file: that would write one.
+    if (file_exists(path) && !load_settings(path, s, error)) note = L"(" + error + L": the defaults are used)\n";
+    for (const auto &o : args.overrides)
+        if (!apply_override(s, o, error)) note += L"(" + error + L")\n";
+    const SystemInfo system = survey_system(s);
+    if (!cards) return system_report(system, nullptr, nullptr);
+    const std::vector<CaptureDevice> devices = list_devices();
+    const Advice advice = advise(advice_input(s, system, devices, app_dir() + L"\\engine"));
+    return system_report(system, &devices, &advice) + note;
 }
 
 // One Glasir at a time: a second one asks the first to close (it ends its
@@ -422,7 +439,10 @@ std::wstring open_error(const std::wstring &device, HRESULT hr) {
 }
 
 // Picks and opens the source. False after reporting why there is none.
-bool open_source(const Args &args, const Settings &s, Source &src) {
+// devices: the cards (list_devices); screen_height: of the screen Glasir
+// plays on, which the automatic capture size goes by (0: unknown, any size).
+bool open_source(const Args &args, const Settings &s, const std::vector<CaptureDevice> &devices, UINT32 screen_height,
+                 Source &src) {
     if (!args.input_raw.empty()) {
         if (!s.width || !s.height || s.fps <= 0) {
             report(L"--input-raw needs capture.width, capture.height and capture.fps.");
@@ -454,11 +474,10 @@ bool open_source(const Args &args, const Settings &s, Source &src) {
     request.width = s.width;
     request.height = s.height;
     request.fps = s.fps;
-    request.max_auto_height = UINT32(GetSystemMetrics(SM_CYSCREEN));
+    request.max_auto_height = screen_height;
 
     // The card list also guides the DirectShow path: which device is the
     // card, and which mode to ask for.
-    const std::vector<CaptureDevice> devices = list_devices();
     ModeRequest any = request;
     any.supported_only = false;
     const CaptureDevice *device = nullptr;
@@ -703,8 +722,9 @@ constexpr DWORD kRestartCode = 42;
 // One report is made at a time; an F9 meanwhile waits for it (the latest).
 class InGameReports {
 public:
-    InGameReports(const std::wstring &dir, const std::wstring &settings, const std::wstring &pipe, MpvProcess &mpv)
-        : dir_(dir), settings_(settings), pipe_(pipe), mpv_(mpv) {}
+    InGameReports(const Args &args, const std::wstring &dir, const std::wstring &settings, const std::wstring &pipe,
+                  MpvProcess &mpv, const std::wstring &advice)
+        : args_(args), dir_(dir), settings_(settings), pipe_(pipe), mpv_(mpv), advice_(advice) {}
     InGameReports(const InGameReports &) = delete;
     InGameReports &operator=(const InGameReports &) = delete;
     ~InGameReports() {
@@ -754,6 +774,9 @@ private:
         in.settings_path = settings_;
         in.frames = r.frames;
         in.how = L"F9 while playing";
+        // The screens are read again (HDR or G-SYNC may have been switched
+        // since the start). The advice is the one from this start.
+        in.extra = system_text(args_, false) + advice_;
         std::wstring zip, error;
         std::wstring text;
         if (!save_bug_report(in, zip, error)) {
@@ -770,8 +793,10 @@ private:
         mpv_.send(pipe_, ipc_command({L"script-message", L"glasir-toast", text, L"4000"}), 2000);
     }
 
+    const Args &args_;
     std::wstring dir_, settings_, pipe_;
     MpvProcess &mpv_;
+    std::wstring advice_;
     std::mutex m_;
     bool running_ = false;
     std::optional<Request> pending_;
@@ -832,10 +857,29 @@ int run(const Args &args, bool again, bool &stuck, bool &restart) {
         return 1;
     }
     CreateDirectoryW(plan.screenshot_dir.c_str(), nullptr);
-    const GpuInfo gpu = display_gpu();
+    // The screen Glasir plays on and the GPU mpv draws on (glasir.ini's
+    // [display], else the primary screen and the GPU it is plugged into).
+    const SystemInfo system = survey_system(s);
+    for (const DisplayInfo &d : system.displays)
+        log(L"screen {}{}: {}{}", d.number, d.primary ? L" (main)" : L"", display_text(d),
+            d.device == system.display.device ? L"  <- Glasir plays here" : L"");
+    if (!system.monitor_matched && !s.monitor.empty())
+        log(L"display.monitor = {} names no screen: playing on the main one", s.monitor);
+    for (const GpuInfo &g : system.gpus) log(L"GPU: {}", gpu_text(g));
+    const GpuInfo &gpu = system.gpu.gpu;
+    log(L"mpv draws on {}{}", gpu.found ? gpu.name : L"its own choice of GPU (none was found)",
+        system.gpu.setting_not_found  ? L" (display.gpu = " + s.gpu + L" names no GPU of this PC)"
+        : system.gpu.by_setting       ? std::wstring(L" (display.gpu)")
+        : system.gpu.screen_gpu.found ? std::wstring(L" (the screen is plugged into it)")
+                                      : std::wstring());
+    if (system.gpu.other_than_screen)
+        log(L"the screen is on {}: frames are copied between the GPUs", system.gpu.screen_gpu.name);
     plan.vsr = vsr_kind(gpu);
-    plan.display = primary_display();
-    log(L"display: {}", display_text(plan.display));
+    plan.display = system.display;
+    plan.on_display = !s.monitor.empty() && system.monitor_matched && system.display.found;
+    // Named for mpv whenever it is known, so the GPU judged here (DLSS 5,
+    // VSR) is the one mpv really draws on.
+    if (gpu.found) plan.d3d11_adapter = gpu.name;
     if (reshade_installed(engine)) {
         // DLSS 5: auto runs it on an RTX 30, 40 or 50 GPU; on tries any GPU.
         const bool installed = dlss5_installed(engine);
@@ -859,7 +903,37 @@ int run(const Args &args, bool again, bool &stuck, bool &restart) {
     // Declared in this order so they end in reverse: the watcher before mpv,
     // mpv before the card, the card before the one-instance lock.
     Source src;
-    if (!open_source(args, s, src)) return 1;
+    std::wstring advice_now;
+    {
+        const std::vector<CaptureDevice> devices =
+            args.input_raw.empty() ? list_devices() : std::vector<CaptureDevice>{};
+        if (!open_source(args, s, devices, system.display.found ? UINT32(system.display.height) : 0, src)) return 1;
+        // What this start will do, what holds it back and what would suit
+        // this PC (advice.h): to the log, and into a bug report made with F9.
+        AdviceInput in = advice_input(s, system, devices, engine);
+        if (src.raw_input) {
+            // --input-raw: the "card" is the file, its one mode what was given.
+            VideoMode m;
+            m.format = src.layout.format;
+            m.supported = true;
+            m.subtype = format_name(m.format);
+            m.width = src.layout.width;
+            m.height = src.layout.height;
+            m.fps = src.fps;
+            in.card_found = true;
+            in.card = L"raw input";
+            in.modes = {m};
+        } else if (!in.card_found) {
+            in.card_found = true;  // a card only DirectShow sees
+            in.card = src.device_name;
+        }
+        advice_now = advice_text(advise(in));
+        for (size_t at = 0; at < advice_now.size();) {
+            const size_t end = advice_now.find(L'\n', at);
+            log(L"{}", advice_now.substr(at, end - at));
+            at = end == std::wstring::npos ? advice_now.size() : end + 1;
+        }
+    }
     plan.raw = src.raw;
     plan.layout = src.layout;
     plan.fps = src.fps;
@@ -874,17 +948,17 @@ int run(const Args &args, bool again, bool &stuck, bool &restart) {
     SetEnvironmentVariableW(L"GLASIR_HDR_AVAILABLE", src.hdr_available ? L"1" : L"0");
     // What Glasir found out about the screen, for the add-ons inside mpv.
     // VRR: "on", "off" or "unknown" (glasir.ini's display.vrr, else as found).
+    // They describe the screen Glasir plays on (display.monitor).
     {
         const DisplayInfo &d = plan.display;
-        const wchar_t *vrr = s.vrr == Settings::Vrr::On    ? L"on"
-                             : s.vrr == Settings::Vrr::Off ? L"off"
-                             : d.vrr == DisplayInfo::Vrr::On ? L"on"
-                             : d.vrr == DisplayInfo::Vrr::Unsupported ? L"off"
-                                                                      : L"unknown";
+        const wchar_t *vrr =
+            vrr_for_addons(d.vrr, s.vrr == Settings::Vrr::On ? 1 : s.vrr == Settings::Vrr::Off ? 0 : -1);
         SetEnvironmentVariableW(L"GLASIR_DISPLAY_VRR", vrr);
         SetEnvironmentVariableW(L"GLASIR_DISPLAY_HZ", std::format(L"{:.3f}", d.refresh_hz).c_str());
         const double paper = s.paper_white_nits > 0 ? s.paper_white_nits : d.sdr_white_nits > 0 ? d.sdr_white_nits : 203.0;
         SetEnvironmentVariableW(L"GLASIR_PAPER_WHITE_NITS", std::format(L"{:.0f}", paper).c_str());
+        log(L"for the add-ons: GLASIR_DISPLAY_VRR={} GLASIR_DISPLAY_HZ={:.3f} GLASIR_PAPER_WHITE_NITS={:.0f}", vrr,
+            d.refresh_hz, paper);
     }
     SetEnvironmentVariableW(L"GLASIR_WINDOW_MODE",
                             s.fullscreen ? L"fullscreen" : s.borderless ? L"borderless" : L"windowed");
@@ -901,6 +975,7 @@ int run(const Args &args, bool again, bool &stuck, bool &restart) {
         w.borderless = s.borderless;
         w.fullscreen = s.fullscreen;
         w.skip_bars = s.skip_black_bars;
+        if (plan.on_display) w.screen = plan.display.device;
         w.width = plan.raw ? plan.layout.width : (plan.dshow_mode ? plan.dshow_mode->width : s.width);
         w.height = plan.raw ? plan.layout.height : (plan.dshow_mode ? plan.dshow_mode->height : s.height);
         w.mpv_command = [&mpv, pipe = plan.ipc_pipe](const std::vector<std::wstring> &words) {
@@ -909,7 +984,7 @@ int run(const Args &args, bool again, bool &stuck, bool &restart) {
         backdrop.start(mpv.pid(), std::move(w));
     }
     int rc = 0;
-    InGameReports reports(dir, settings_path, plan.ipc_pipe, mpv);  // after changes stops: it calls this
+    InGameReports reports(args, dir, settings_path, plan.ipc_pipe, mpv, advice_now);  // after changes stops: it calls this
     MpvWatch changes;
     changes.on_message = [&reports, &backdrop](const std::vector<std::string> &words) {
         if (words.front() == "glasir-window" && words.size() > 1 && words[1] == "again")
@@ -1080,10 +1155,6 @@ int run(const Args &args, bool again, bool &stuck, bool &restart) {
     return rc;
 }
 
-std::wstring settings_file(const Args &args) {
-    return args.settings_path.empty() ? app_dir() + L"\\glasir.ini" : args.settings_path;
-}
-
 bool launcher_wanted(const Args &args) {
     if (!args.dialogs || args.setup || args.play || !args.input_raw.empty()) return false;
     Settings s;
@@ -1182,7 +1253,7 @@ bool bug_report_now(const Args &args, std::wstring &zip, std::wstring &error, co
     in.app_dir = app_dir();
     in.settings_path = settings_file(args);
     in.how = how;
-    in.extra = L"Capture cards:\n" + device_list_text();
+    in.extra = system_text(args, true) + L"\nCapture cards, every mode:\n" + device_list_text();
     return save_bug_report(in, zip, error);
 }
 
@@ -1266,7 +1337,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     if (args.list) {
         print(device_list_text(), args.dialogs);
     } else if (args.system) {
-        print(system_text(), args.dialogs);
+        print(system_text(args, true), args.dialogs);
     } else {
         const std::wstring dir = app_dir();
         CreateDirectoryW((dir + L"\\logs").c_str(), nullptr);

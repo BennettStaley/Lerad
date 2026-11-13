@@ -27,6 +27,24 @@ tests.
 
 ## VRR / G-SYNC
 
+- `Glasir.exe --system` shows what Glasir found for each screen: whether it
+  has variable refresh, its range, whether it is switched on, and how each
+  fact was found (the monitor's EDID, NVIDIA's driver). The log
+  (`logs\glasir.log`) has the same at every start.
+  - **"VRR off ... not offered on this screen"** (NVIDIA): the monitor can,
+    but G-SYNC is not set up for it. In the NVIDIA Control Panel, "Set up
+    G-SYNC", pick that screen and tick "Enable settings for the selected
+    display model" (monitors NVIDIA has not tested are off until you do),
+    and check that Adaptive-Sync / FreeSync is on in the monitor's own menu.
+  - **"VRR supported"**: the monitor can, but Glasir cannot read whether it
+    is switched on. That is all it can tell with an AMD or Intel GPU today.
+    If FreeSync is on in the GPU's software, set `[display] vrr = on` in
+    `glasir.ini`.
+  - **"VRR unknown"**: nothing could be read (some monitors with a G-SYNC
+    module, or a screen on an adapter). Set `[display] vrr = on` or `off`.
+- With more than one screen, `[display] monitor` picks the one Glasir plays
+  on (its number in `--system`, or a part of its name); VRR, HDR and the
+  refresh rate are then read for that screen.
 - In the NVIDIA Control Panel, G-SYNC must be on **for windowed and full
   screen mode** (Glasir's full screen and borderless modes are both windows
   that cover the screen; neither is exclusive full screen).

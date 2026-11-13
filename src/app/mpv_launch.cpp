@@ -67,6 +67,14 @@ std::vector<std::wstring> mpv_arguments(const MpvPlan &plan, const Settings &s) 
     } else {
         a.push_back(L"--geometry=1280x720");
     }
+    if (plan.on_display && plan.display.enum_index >= 0) {
+        // mpv counts the screens as Windows lists them; its window opens on
+        // this one, and its own full screen (f) stays there. (--screen-name
+        // does nothing in mpv on Windows: tried with \\.\DISPLAY1 and the
+        // monitor's name.)
+        a.push_back(std::format(L"--screen={}", plan.display.enum_index));
+        a.push_back(std::format(L"--fs-screen={}", plan.display.enum_index));
+    }
     if (!plan.log_file.empty()) a.push_back(L"--log-file=" + plan.log_file);
     if (!plan.d3d11_adapter.empty()) a.push_back(L"--d3d11-adapter=" + plan.d3d11_adapter);
 

@@ -44,6 +44,9 @@ struct MpvPlan {
     // The screen mpv opens on (display.h): HDR and brightness decide how an
     // HDR capture is put out.
     DisplayInfo display;
+    // glasir.ini names the screen (display.monitor): mpv opens its window on
+    // display. False: mpv's own choice, the primary screen.
+    bool on_display = false;
     // The GPU mpv renders on (--d3d11-adapter), empty: mpv's own choice.
     std::wstring d3d11_adapter;
 };
