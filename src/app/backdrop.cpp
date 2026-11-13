@@ -56,6 +56,41 @@ RECT work_rect(HWND hwnd) {
     return mi.rcWork;
 }
 
+// The monitor Windows calls device ("\\.\DISPLAY2"), or null.
+HMONITOR monitor_by_device(const std::wstring &device) {
+    struct Find {
+        const std::wstring &device;
+        HMONITOR found;
+    } f{device, nullptr};
+    EnumDisplayMonitors(
+        nullptr, nullptr,
+        [](HMONITOR monitor, HDC, LPRECT, LPARAM lp) -> BOOL {
+            auto *f = reinterpret_cast<Find *>(lp);
+            MONITORINFOEXW mi{};
+            mi.cbSize = sizeof(mi);
+            if (!GetMonitorInfoW(monitor, &mi) || _wcsicmp(mi.szDevice, f->device.c_str()) != 0) return TRUE;
+            f->found = monitor;
+            return FALSE;
+        },
+        reinterpret_cast<LPARAM>(&f));
+    return f.found;
+}
+
+// mpv's window goes to the screen glasir.ini asks for, if mpv opened it on
+// another: over the whole screen when borderless, else the same size in the
+// middle of it.
+void move_to_screen(HWND mpv, const WindowSetup &setup) {
+    const HMONITOR want = setup.screen.empty() ? nullptr : monitor_by_device(setup.screen);
+    if (!want || MonitorFromWindow(mpv, MONITOR_DEFAULTTONEAREST) == want) return;
+    MONITORINFO mi{sizeof(mi)};
+    RECT now{};
+    if (!GetMonitorInfoW(want, &mi) || !GetWindowRect(mpv, &now)) return;
+    RECT to = mi.rcMonitor;
+    if (!setup.borderless) to = centre_window(mi.rcWork, now.right - now.left, now.bottom - now.top);
+    SetWindowPos(mpv, nullptr, to.left, to.top, to.right - to.left, to.bottom - to.top, SWP_NOZORDER | SWP_NOACTIVATE);
+    log(L"window: moved to {} (mpv opened it on another screen)", setup.screen);
+}
+
 // A frame around the client area. Not the style: mpv's borderless window at
 // start keeps WS_CAPTION and hides the frame itself (WM_NCCALCSIZE).
 bool has_border(HWND hwnd) {
@@ -309,6 +344,7 @@ void Backdrop::run() {
     State state;
     state.mpv = mpv;
     state.setup = setup_;
+    if (!setup_.fullscreen) move_to_screen(mpv, setup_);
     const RECT mon = monitor_rect(mpv);
     state.window = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, kClass, L"Glasir", WS_POPUP, mon.left, mon.top,
                                    mon.right - mon.left, mon.bottom - mon.top, nullptr, nullptr, wc.hInstance, nullptr);

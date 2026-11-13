@@ -256,7 +256,7 @@ const char *default_settings_text() {
 ; The card's name as "Glasir.exe --list" shows it. Empty: pick automatically.
 device =
 ; Capture size and rate. 0: automatic (60 fps if offered, the largest size
-; that fits the display).
+; that fits the screen Glasir plays on).
 width = 0
 height = 0
 fps = 0
@@ -310,14 +310,20 @@ dynamic_peak = 0
 paper_white_nits = 0
 
 [display]
-; The screen Glasir plays on: its number as Windows' display settings show it
-; (1, 2) or a part of its name. Empty: the main screen.
+; The screen Glasir plays on: its number (1, 2: as "Glasir.exe --system" lists
+; the screens, usually the numbers of Windows' display settings) or a part of
+; its name. Empty: the main screen. The automatic capture size, HDR, the
+; refresh rate and VRR all go by this screen.
 monitor =
-; Variable refresh rate (G-SYNC, FreeSync, HDMI VRR) on the PC's screen.
-; auto: as Glasir finds it. on / off: if it finds it wrong.
+; Variable refresh rate (G-SYNC, FreeSync, HDMI VRR) on that screen.
+; auto: as Glasir finds it ("Glasir.exe --system" says what it found and
+; how; with an AMD or Intel GPU it can read what the screen can do, not
+; whether it is switched on). on / off: if you know better.
 vrr = auto
 ; The GPU mpv draws on, by a part of its name ("RTX", "Radeon"). Empty: the
-; one the screen is plugged into.
+; one the screen is plugged into, which is the direct path. Another GPU works
+; (a laptop's RTX for DLSS 5, with the screen on its integrated graphics),
+; but each frame is then copied between the two.
 gpu =
 
 [frames]

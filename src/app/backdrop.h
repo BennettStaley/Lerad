@@ -36,6 +36,10 @@ struct WindowSetup {
     bool fullscreen = false;  // window.mode = fullscreen: mpv starts in its own full screen
     bool skip_bars = false;   // glasir.ini window.skip_black_bars (full screen only)
     UINT32 width = 0, height = 0;  // the picture; 0: unknown (full screen covers the screen)
+    // The screen to play on ("\\.\DISPLAY2", glasir.ini's display.monitor);
+    // empty: where mpv opens. mpv is told the same; if its window still
+    // comes up on another screen, it is moved.
+    std::wstring screen;
     // Runs an mpv command over IPC (from the backdrop's own thread).
     std::function<void(const std::vector<std::wstring> &)> mpv_command;
 };

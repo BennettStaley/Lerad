@@ -140,6 +140,14 @@ press **Play**.
   is saved there too.
 - The card's own audio input is found automatically. DLSS 5 turns itself on
   with an NVIDIA RTX 30, 40 or 50 series GPU (`[dlss5] enabled = auto`).
+- With more than one screen, Glasir plays on the main one. `[display]
+  monitor = 2` (or a part of the monitor's name) picks another; the capture
+  size, HDR and VRR then go by that screen. `[display] gpu` picks the GPU
+  on a PC with several.
+- `Glasir.exe --system` shows what Glasir found on your PC (GPUs, each
+  screen with HDR and VRR, the capture card), what your settings will do
+  there (the capture mode, the frame rate shown, HDR or tone mapped), what
+  holds it back and which settings would suit it.
 
 ### Keys
 
