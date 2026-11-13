@@ -71,6 +71,7 @@ GpuInfo gpu(const wchar_t *name, unsigned vendor, unsigned mb, bool with_screen 
 // A desktop with one RTX 5090, the Elgato and default settings.
 AdviceInput desktop(const DisplayInfo &d) {
     AdviceInput in;
+    in.settings.dlss5 = Settings::Dlss5::Auto;  // asked for (it is off by default)
     in.display = d;
     in.gpus = {gpu(L"NVIDIA GeForce RTX 5090", kVendorNvidia, 32000)};
     in.gpu = choose_gpu(in.gpus, d.device, L"");

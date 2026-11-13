@@ -374,11 +374,12 @@ show_rates = 0
 all_frames_when_off = 1
 
 [dlss5]
-; DLSS 5 neural rendering (NVIDIA RTX 30, 40 and 50 series). auto: on with
-; one of those GPUs, off otherwise. on: always try (e.g. an RTX 20). off:
-; starts off; on an RTX 30, 40 or 50 the menu (Tab) can switch it on. F6
-; toggles it while playing.
-enabled = auto
+; DLSS 5 neural rendering (NVIDIA RTX 30, 40 and 50 series). It redraws the
+; picture and changes how a game looks, so it is off unless you ask for it.
+; off: starts off; on an RTX 30, 40 or 50 the menu (Tab) can switch it on.
+; auto: on with one of those GPUs, off otherwise. on: always try (e.g. an
+; RTX 20). F6 toggles it while playing.
+enabled = off
 
 [audio]
 ; 1: play the card's sound (low latency, through mpv). 0: no sound.

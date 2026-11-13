@@ -1724,7 +1724,10 @@ void FrameGen::watch_refresh(IDXGISwapChain *swapchain, double now) {
     double at = 0;
     if (!refresh_counter(swapchain, count, at)) return;
     if (refresh_at_ > 0 && at > refresh_at_ + 0.5 && at < refresh_at_ + 3.0) {
-        seen_hz_ = double(count - refresh_count_) / (at - refresh_at_);
+        // The counter can stand still or jump back when the window is flipped
+        // straight to a VRR screen: a count that makes no sense is "unknown".
+        const double counted = double(static_cast<INT32>(count - refresh_count_)) / (at - refresh_at_);
+        seen_hz_ = counted > 0 && counted < 1000 ? counted : 0;
         const double shown = shown_real_.rate(now) + shown_generated_.rate(now);
         const fg::pacing::Seen seen = fg::pacing::judge_refresh(seen_hz_, display_hz_, shown);
         // "Fixed" only after three seconds of it: one sample can straddle a

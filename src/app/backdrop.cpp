@@ -140,10 +140,32 @@ void mark_full_screen(State &s, bool on) {
     s.marked = on;
 }
 
+// mpv's borderless window keeps a caption and a sizing frame in its style and
+// only hides them. Windows composes such a window even when it covers the
+// screen: a frame later, no variable refresh, and frame generation's second
+// present waits ("queue full"). As a plain popup it is flipped straight to
+// the screen (PresentMon: "Hardware: Independent Flip" instead of "Composed:
+// Flip"; measured on a 4K 120 Hz G-SYNC screen: 30 + 30 fps instead of
+// 30 + 25). mpv puts its own style back when it changes its border or leaves
+// its full screen, so this is checked whenever the window moves.
+void plain_popup(HWND mpv, bool popup) {
+    if (!IsWindow(mpv)) return;
+    const DWORD style = static_cast<DWORD>(GetWindowLongPtrW(mpv, GWL_STYLE));
+    const DWORD frame = WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_SYSMENU;
+    DWORD want = style;
+    if (popup && (style & (WS_CAPTION | WS_THICKFRAME))) want = (style & ~frame) | WS_POPUP;
+    if (!popup) want = style & ~DWORD(WS_POPUP);
+    if (want == style) return;
+    SetWindowLongPtrW(mpv, GWL_STYLE, static_cast<LONG_PTR>(want));
+    SetWindowPos(mpv, nullptr, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+}
+
 // The backdrop goes right under mpv's window, over the whole monitor - or
 // away while mpv is a window, minimised, hidden, gone or covers the screen
 // itself.
 void sync(State &s) {
+    if (s.setup.borderless && !s.settling) plain_popup(s.mpv, true);
     RECT r{};
     const bool show = boxed(s) && IsWindow(s.mpv) && IsWindowVisible(s.mpv) && !IsIconic(s.mpv) &&
                       !has_border(s.mpv) && GetWindowRect(s.mpv, &r);
@@ -203,6 +225,7 @@ void settle(State &s) {
     }
     if (has_border(s.mpv) == s.setup.borderless) return;  // mpv has not changed its border yet
     RECT want = s.target;
+    plain_popup(s.mpv, s.setup.borderless);
     if (!s.setup.borderless) {
         const DWORD style = static_cast<DWORD>(GetWindowLongPtrW(s.mpv, GWL_STYLE));
         const DWORD ex = static_cast<DWORD>(GetWindowLongPtrW(s.mpv, GWL_EXSTYLE));

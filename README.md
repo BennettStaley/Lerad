@@ -162,8 +162,8 @@ generation, then press **Play**.
 - Everything is kept in `glasir.ini`, and every key is explained in the
   file. What you change while playing (volume, boost, audio delay, the menu)
   is saved there too.
-- The card's own audio input is found automatically. DLSS 5 turns itself on
-  with an NVIDIA RTX 30, 40 or 50 series GPU (`[dlss5] enabled = auto`).
+- The card's own audio input is found automatically. DLSS 5 is off
+  until you switch it on, in Glasir's window or the menu (`[dlss5] enabled`).
 - With more than one screen, pick the one to play on under **Screen** (each
   is listed with its size, refresh rate, HDR and VRR); the capture size, HDR
   and VRR then go by that screen. Glasir's window can be on any screen. On a
@@ -297,7 +297,7 @@ This configures, builds, runs the tests and puts the portable app folder in
 `out\Glasir`. Third-party programs are not in the repo:
 
 ```
-out\Glasir\Glasir.exe --setup --no-dialogs   # mpv, ReShade (and DLSS 5 on RTX 30/40/50) into out\Glasir\engine
+out\Glasir\Glasir.exe --setup --no-dialogs   # mpv, ReShade (and DLSS 5 if it is there already) into out\Glasir\engine
 out\Glasir\Glasir.exe --list                 # the capture cards and their modes
 ```
 

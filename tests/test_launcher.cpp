@@ -58,6 +58,7 @@ DisplayInfo proart() {
 // The target use: a PS5 at 4K30 HDR through an Elgato 4K X on that screen.
 AdviceInput target() {
     AdviceInput in;
+    in.settings.dlss5 = Settings::Dlss5::Auto;  // asked for (it is off by default)
     in.display = proart();
     GpuInfo g;
     g.name = L"NVIDIA GeForce RTX 5090";
@@ -276,7 +277,7 @@ int main() {
                                  L"framegen.show_rates=1", L"hdr.fit_to_screen=1", L"hdr.display_peak_nits=1000",
                                  L"hdr.tone_mapping=bt.2390", L"hdr.output=hdr", L"display.vrr=off",
                                  L"window.mode=fullscreen", L"video.sdr_range=full", L"video.hdr_peak_nits=4000",
-                                 L"framegen.method=blend", L"hdr.dynamic_peak=1", L"dlss5.enabled=off"})
+                                 L"framegen.method=blend", L"hdr.dynamic_peak=1", L"dlss5.enabled=auto"})
             expect(apply_override(to, o, error), "an override is taken");
         const std::vector<SettingValue> v = changed_settings(from, to);
         expect(v.size() == 19, "19 values for 19 changes");
@@ -287,7 +288,7 @@ int main() {
                    has(v, L"hdr.tone_mapping=bt.2390") && has(v, L"hdr.output=hdr") && has(v, L"display.vrr=off") &&
                    has(v, L"window.mode=fullscreen") && has(v, L"video.sdr_range=full") &&
                    has(v, L"video.hdr_peak_nits=4000") && has(v, L"framegen.method=blend") &&
-                   has(v, L"hdr.dynamic_peak=1") && has(v, L"dlss5.enabled=off"),
+                   has(v, L"hdr.dynamic_peak=1") && has(v, L"dlss5.enabled=auto"),
                "each as glasir.ini spells it");
         // Read back, they give the same settings again.
         Settings back = from;

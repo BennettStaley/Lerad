@@ -29,7 +29,7 @@
 //
 // --setup downloads (or updates) the programs Glasir runs on: it asks which,
 // or with --no-dialogs takes --components (default: mpv, ReShade, and DLSS 5
-// if it is there already or the GPU is an RTX 30, 40 or 50). The first start
+// if it is there already). The first start
 // does the same when mpv or ReShade is missing.
 //
 // --update installs the newest Glasir from its GitHub releases if it is
@@ -633,10 +633,9 @@ enum class SetupResult { Play, Stop, Failed };
 SetupResult setup(const Args &args, const std::wstring &dir, const std::wstring &engine) {
     const bool need = !component_installed(engine, Component::Mpv) || !component_installed(engine, Component::ReShade);
     if (!args.setup && !need) return SetupResult::Play;
-    // DLSS 5 is offered when any GPU of this PC can run it, whichever screen
-    // Glasir plays on (display.gpu can put mpv on it).
-    bool dlss5_default = component_installed(engine, Component::Dlss5);
-    for (const GpuInfo &g : list_gpus()) dlss5_default = dlss5_default || dlss5_gpu(g);
+    // DLSS 5 is off unless asked for, so its download is ticked only where
+    // it is installed already (an update).
+    const bool dlss5_default = component_installed(engine, Component::Dlss5);
     std::vector<Component> which;
     if (!args.dialogs) {
         // Nothing is downloaded unasked when no one can be asked.
