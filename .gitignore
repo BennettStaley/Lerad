@@ -26,3 +26,6 @@ __pycache__/
 /framegen-captures/
 *.raw
 *.log
+
+# The working notes for coding agents stay local
+CLAUDE.md
