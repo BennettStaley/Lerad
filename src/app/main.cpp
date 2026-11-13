@@ -63,6 +63,7 @@
 #include "components.h"
 #include "devices.h"
 #include "display.h"
+#include "hdr.h"
 #include "files.h"
 #include "glasir_version.h"
 #include "launcher.h"
@@ -883,8 +884,9 @@ int run(const Args &args, bool again, bool &stuck, bool &restart) {
                                                                       : L"unknown";
         SetEnvironmentVariableW(L"GLASIR_DISPLAY_VRR", vrr);
         SetEnvironmentVariableW(L"GLASIR_DISPLAY_HZ", std::format(L"{:.3f}", d.refresh_hz).c_str());
-        const double paper = s.paper_white_nits > 0 ? s.paper_white_nits : d.sdr_white_nits > 0 ? d.sdr_white_nits : 203.0;
-        SetEnvironmentVariableW(L"GLASIR_PAPER_WHITE_NITS", std::format(L"{:.0f}", paper).c_str());
+        // HDR (hdr.h): the menu's white, and what is done with an HDR capture.
+        for (const auto &[name, value] : hdr_environment(s, d)) SetEnvironmentVariableW(name.c_str(), value.c_str());
+        if (s.hdr) log(L"HDR: {}", hdr_plan_text(hdr_plan(s, d)));
     }
     SetEnvironmentVariableW(L"GLASIR_WINDOW_MODE",
                             s.fullscreen ? L"fullscreen" : s.borderless ? L"borderless" : L"windowed");

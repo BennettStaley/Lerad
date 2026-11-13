@@ -107,6 +107,9 @@ bool apply(Settings &s, const std::wstring &section, const std::wstring &key, co
         else if (l == L"hdr") s.hdr_output = Settings::HdrOutput::Hdr;
         else if (l == L"sdr") s.hdr_output = Settings::HdrOutput::Sdr;
         else return bad(L"auto, hdr or sdr");
+    } else if (name == L"hdr.fit_to_screen") {
+        if (!parse_bool(value, b)) return bad(L"1 or 0");
+        s.hdr_fit_to_screen = b;
     } else if (name == L"hdr.display_peak_nits") {
         if (!parse_int(value, 0, 10000, n) || (n && n < 80)) return bad(L"0 or 80 to 10000");
         s.display_peak_nits = int(n);
@@ -266,7 +269,9 @@ path = auto
 mode = sdr
 ; The SDR signal's range: limited (most consoles) or full.
 sdr_range = limited
-; Peak brightness written into the HDR10 metadata.
+; The brightest the console's HDR picture gets (nits): what its HDR
+; calibration is set to. It is written into the HDR10 metadata, and it is
+; where tone mapping starts from ([hdr] fit_to_screen, SDR output).
 hdr_peak_nits = 1000
 ; How a capture smaller than the window is scaled up (before DLSS 5):
 ; mpv (its own Lanczos), fsr (AMD FSR 1: sharper, any GPU), vsr (the GPU's
@@ -281,15 +286,24 @@ scaling = mpv
 ; screen as HDR when Windows has HDR on for it, else tone mapped to SDR.
 ; hdr: always sent as HDR. sdr: always tone mapped to SDR.
 output = auto
-; The screen's peak brightness (nits) the picture is fitted to. 0: what the
-; screen reports to Windows.
+; HDR to the screen. 0: the picture goes out as the console sends it, as it
+; would over a cable; set the console's HDR calibration while playing through
+; Glasir and it fits this screen. 1: Glasir fits the picture to the screen's
+; peak brightness itself (for a console that cannot be calibrated to this
+; screen: highlights that clip to white, or a picture that is too dim).
+fit_to_screen = 0
+; fit_to_screen = 1: the screen's peak brightness (nits). 0: what the screen
+; reports to Windows, which is often too low; set the real value if you know it.
 display_peak_nits = 0
-; How highlights brighter than the screen are brought down: auto, clip,
-; spline, bt.2390, bt.2446a, st2094-40, st2094-10, mobius, reinhard, hable,
-; gamma or linear (mpv's tone mapping curves).
+; fit_to_screen = 1 and SDR output: how highlights brighter than the screen
+; are brought down. auto, clip, spline, bt.2390, bt.2446a, st2094-40,
+; st2094-10, mobius, reinhard, hable, gamma or linear (mpv's tone mapping
+; curves). auto: bt.2390 when fitting to an HDR screen (only the highlights
+; change), spline for SDR.
 tone_mapping = auto
-; 1: measure each frame's brightest point instead of trusting hdr_peak_nits
-; (a better fit for games that never reach their peak; some GPU time).
+; fit_to_screen = 1 and SDR output. 1: measure each frame's brightest point
+; instead of trusting [video] hdr_peak_nits (a better fit for games that
+; never reach their peak; some GPU time).
 dynamic_peak = 0
 ; How bright the menu's white is in HDR (nits). 0: Windows' "SDR content
 ; brightness" for the screen.

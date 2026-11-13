@@ -19,7 +19,9 @@
 --
 -- Options (script-opts glasir_scaling-...): mode, vsr (nvidia, intel or
 -- none: what the GPU has), hdr (yes: HDR10 frames), hdr_peak (nits, as
--- tagged). "script-message glasir-scaling <mode>" switches while playing
+-- tagged: the same tags as Glasir's own format filter gives the capture, so
+-- mpv's output, passed through or tone mapped, does not change with VSR).
+-- "script-message glasir-scaling <mode>" switches while playing
 -- (the in-game menu); user-data/glasir/scaling says the mode.
 local mp = require 'mp'
 local opts = { mode = 'mpv', vsr = 'nvidia', hdr = false, hdr_peak = 1000 }

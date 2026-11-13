@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <format>
 
+#include "hdr.h"
 #include "json.h"
 #include "log.h"
 
@@ -18,7 +19,11 @@ std::wstring fps_text(double fps) {
 }
 
 // The colour tags raw frames need: they carry none of their own. SDR from
-// consoles is BT.709; NV12 from cards is sited top-left, 4:2:2 left.
+// consoles is BT.709; NV12 from cards is sited top-left, 4:2:2 left. HDR is
+// HDR10 (BT.2020, PQ, limited range) with the peak from glasir.ini as its
+// mastering peak and MaxCLL: mpv passes them on as the swap chain's metadata
+// and starts tone mapping from them. glasir_scaling.lua puts the same tags
+// back after the GPU's video super resolution.
 std::wstring colour_filter(const MpvPlan &plan, const Settings &s) {
     if (s.hdr)
         return std::format(L"format=colormatrix=bt.2020-ncl:colorlevels=limited:primaries=bt.2020:gamma=pq:"
@@ -121,12 +126,15 @@ std::vector<std::wstring> mpv_arguments(const MpvPlan &plan, const Settings &s) 
         }
     }
     if (s.hdr) {
-        a.push_back(L"--target-colorspace-hint=yes");
-        a.push_back(L"--d3d11-output-format=rgb10_a2");
-        a.push_back(L"--d3d11-output-csp=pq");
-        a.push_back(L"--hdr-compute-peak=no");
+        // HDR10 to the screen or tone mapped to SDR, as hdr.h decides from
+        // glasir.ini's [hdr] and the screen.
+        for (auto &option : hdr_mpv_options(hdr_plan(s, plan.display), s)) a.push_back(std::move(option));
     } else {
+        // An SDR swap chain, said outright: mpv's own choice follows the
+        // desktop, and with HDR on in Windows that starts as an HDR one.
+        // Windows then shows the picture at its "SDR content brightness".
         a.push_back(L"--target-colorspace-hint=no");
+        a.push_back(L"--d3d11-output-csp=srgb");
     }
     return a;
 }

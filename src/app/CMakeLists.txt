@@ -8,6 +8,7 @@ add_library(glasir_app_core STATIC
     display.cpp
     files.cpp
     gpu.cpp
+    hdr.cpp
     http.cpp
     mpv_launch.cpp
     reshade_config.cpp

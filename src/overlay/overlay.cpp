@@ -9,6 +9,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <mutex>
 #include <string>
 
@@ -26,7 +27,7 @@ namespace glasir::overlay {
 namespace {
 
 constexpr UINT kOpenKey = VK_TAB;
-constexpr float kPaperNits = 203.0f;  // BT.2408's reference white, for the menu in HDR
+constexpr float kPaperNits = 203.0f;  // BT.2408's reference white: the menu in HDR when Glasir names no other
 constexpr double kToastFade = 0.25;    // seconds a toast takes to fade out
 
 struct Overlay {
@@ -50,6 +51,14 @@ struct Overlay {
     bool source_hdr = false;
     bool hdr_available = true;
     bool borderless = true;
+    // The menu's and the toasts' white in HDR (GLASIR_PAPER_WHITE_NITS:
+    // glasir.ini's, else Windows' "SDR content brightness" for the screen),
+    // so that they are as bright as the desktop's own windows.
+    float paper_nits = kPaperNits;
+    // What Glasir does with an HDR capture (its hdr.h), for the menu.
+    std::string hdr_output, hdr_why;
+    int hdr_peak_nits = 0;
+    bool hdr_dynamic_peak = false;
     // Frames the menu was drawn on since it opened: mpv's presents, and the
     // real frames frame generation presents itself.
     unsigned on_mpv = 0, on_real = 0;
@@ -93,6 +102,16 @@ std::string windows_font(const char *file) {
     return GetFileAttributesA(path.c_str()) == INVALID_FILE_ATTRIBUTES ? std::string() : path;
 }
 
+// An environment variable Glasir set before it started mpv; "" if unset.
+std::string environment(const wchar_t *name) {
+    wchar_t value[256] = {};
+    const DWORD n = GetEnvironmentVariableW(name, value, 256);
+    if (n == 0 || n >= 256) return {};
+    std::string out;
+    for (DWORD i = 0; i < n; ++i) out.push_back(value[i] < 128 ? char(value[i]) : '?');  // Glasir's own plain text
+    return out;
+}
+
 bool init(ID3D11Device *device) {
     g.device = device;
     device->GetImmediateContext(&g.context);
@@ -126,7 +145,15 @@ bool init(ID3D11Device *device) {
     wchar_t window_mode[16] = {};
     g.borderless = GetEnvironmentVariableW(L"GLASIR_WINDOW_MODE", window_mode, 16) == 0 ||
                    _wcsicmp(window_mode, L"windowed") != 0;
-    reshade::log::message(reshade::log::level::info, "Glasir menu: ready");
+    const double paper = std::atof(environment(L"GLASIR_PAPER_WHITE_NITS").c_str());
+    g.paper_nits = paper >= 80 && paper <= 1000 ? float(paper) : kPaperNits;
+    g.hdr_output = environment(L"GLASIR_HDR_OUTPUT");
+    g.hdr_why = environment(L"GLASIR_HDR_WHY");
+    g.hdr_peak_nits = std::atoi(environment(L"GLASIR_HDR_PEAK_NITS").c_str());
+    g.hdr_dynamic_peak = environment(L"GLASIR_HDR_DYNAMIC_PEAK") == "1";
+    char ready[96];
+    snprintf(ready, sizeof(ready), "Glasir menu: ready (white in HDR: %.0f nits)", g.paper_nits);
+    reshade::log::message(reshade::log::level::info, ready);
     return true;
 }
 
@@ -213,6 +240,10 @@ void build_and_draw(ID3D11DeviceContext *context, ID3D11Texture2D *back_buffer, 
         frame.settings_path = g.settings_path;
         frame.source_hdr = g.source_hdr;
         frame.hdr_available = g.hdr_available;
+        frame.hdr_output = g.hdr_output;
+        frame.hdr_why = g.hdr_why;
+        frame.hdr_peak_nits = g.hdr_peak_nits;
+        frame.hdr_dynamic_peak = g.hdr_dynamic_peak;
         frame.borderless = g.borderless;
         frame.scale = scale;
         keep = draw_menu(frame);
@@ -230,7 +261,7 @@ void build_and_draw(ID3D11DeviceContext *context, ID3D11Texture2D *back_buffer, 
     if (target) {
         context->OMSetRenderTargets(1, &target, nullptr);
         ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
-        if (!g.compositor.composite(context, back_buffer, g.encoding, kPaperNits) && !reported) {
+        if (!g.compositor.composite(context, back_buffer, g.encoding, g.paper_nits) && !reported) {
             reported = true;
             reshade::log::message(reshade::log::level::warning, "Glasir menu: could not draw on this back buffer");
         }

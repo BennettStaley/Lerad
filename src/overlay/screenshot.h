@@ -39,7 +39,8 @@ bool supported(DXGI_FORMAT format);
 bool is_hdr(const Frame &frame);
 
 // The reference (paper) white HDR is tone-mapped from: BT.2408's 203 nits,
-// as the menu is drawn in HDR.
+// which HDR games are made around. (Not the menu's white, which follows
+// Windows' SDR brightness: the menu is not in the screenshot.)
 constexpr float kReferenceWhiteNits = 203.0f;
 
 // Linear BT.709 light in scRGB units (1.0 = 80 nits) of one pixel of an

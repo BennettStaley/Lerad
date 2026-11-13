@@ -21,6 +21,16 @@ struct MpvState {
     int delay = -1;   // ms, likewise
     int width = 0, height = 0;  // the video's size
     std::string scaling;        // glasir_scaling.lua's mode (user-data/glasir/scaling): mpv, fsr, vsr, cnn, anime4k
+    // HDR, as mpv has it now.
+    std::string hint_mode;     // target-colorspace-hint-mode: "source" (as the console sends it), "target" (fitted)
+    int target_peak = 0;       // target-peak in nits; 0: auto
+    std::string tone_mapping;  // tone-mapping: the curve's name
+    bool compute_peak = false; // hdr-compute-peak = yes
+    // What mpv puts out (video-target-params): "pq" for HDR10, an SDR curve
+    // ("srgb", "bt.1886") otherwise, and the peak it puts out up to. "": no
+    // picture yet.
+    std::string out_gamma;
+    double out_peak = 0;
     // osd-dimensions: the window's size and the black bars around the video
     // (margins left, top, right, bottom); w = 0 until known.
     struct Osd {

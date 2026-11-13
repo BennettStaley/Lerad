@@ -34,6 +34,8 @@ struct MenuState {
     int last_frame = -10;
     Synced volume, boost, delay;
     int borderless = -1;  // full screen (1) or a window (0) since the menu switched it; -1: as mpv started
+    Synced hdr_peak;      // the screen's peak the picture is fitted to (mpv's target-peak)
+    int hdr_dynamic = -1; // measure each frame's peak, since the menu switched it; -1: as glasir.ini has it
 };
 MenuState g_menu;
 
@@ -250,6 +252,94 @@ void sound(const MenuFrame &f, const MpvState &mpv, double now) {
     note("Delay holds the sound back to match the picture.");
 }
 
+// An HDR capture: what is done with it now, and what mpv can change while
+// playing. mpv's own state is what is shown (it is what reaches the screen);
+// what Glasir decided at the start fills in until mpv has a picture.
+//
+// HDR10 to the screen: by default the picture goes out as the console sends
+// it. "Fit highlights to this screen" has mpv tone map it to the screen's
+// peak instead (mpv's target-colorspace-hint-mode, target-peak). Tone mapped
+// (that, or SDR output): the curve and whether each frame's peak is measured.
+void hdr_controls(const MenuFrame &f, const MpvState &mpv, double now) {
+    MpvClient &c = *f.mpv;
+    const bool known = !mpv.out_gamma.empty();
+    const bool out_hdr = known ? mpv.out_gamma == "pq" : f.hdr_output != "sdr";
+    const bool fit = out_hdr && mpv.hint_mode == "target";
+    // The peak fitting uses: mpv's while it fits, else glasir.ini's or the
+    // screen's own; 1000 when nobody knows.
+    const int known_peak = mpv.target_peak > 0 ? mpv.target_peak : f.hdr_peak_nits;
+    g_menu.hdr_peak.follow(known_peak > 0 ? known_peak : 1000, now);
+    const bool dynamic = g_menu.hdr_dynamic >= 0 ? g_menu.hdr_dynamic == 1 : f.hdr_dynamic_peak;
+
+    char text[200];
+    if (!out_hdr) {
+        // mpv puts out SDR although Glasir asked for HDR: Windows gave it no HDR output.
+        const char *why = f.hdr_output == "hdr" ? "mpv got no HDR output from Windows" : f.hdr_why.c_str();
+        std::snprintf(text, sizeof(text), "HDR tone mapped to SDR%s%s.", *why ? ": " : "", why);
+    } else if (fit) {
+        std::snprintf(text, sizeof(text), "HDR10 to the screen, fitted to its %d nits.",
+                      int(std::lround(mpv.out_peak > 0 ? mpv.out_peak : g_menu.hdr_peak.value)));
+    } else if (mpv.out_peak > 0) {
+        std::snprintf(text, sizeof(text), "HDR10 to the screen, as the console sends it (peak %d nits).",
+                      int(std::lround(mpv.out_peak)));
+    } else {
+        std::snprintf(text, sizeof(text), "HDR10 to the screen, as the console sends it.");
+    }
+    note(text);
+
+    if (out_hdr) {
+        bool want = fit;
+        if (ImGui::Checkbox("Fit highlights to this screen", &want)) {
+            if (want) {
+                c.command({"set", "target-peak", std::to_string(g_menu.hdr_peak.value)});
+                c.command({"set", "hdr-compute-peak", dynamic ? "yes" : "no"});
+                c.command({"set", "target-colorspace-hint-mode", "target"});
+                // Kept with the peak when the screen reports none: without
+                // one, the next start could not fit.
+                if (f.hdr_peak_nits <= 0) save(f, "hdr", "display_peak_nits", std::to_string(g_menu.hdr_peak.value));
+            } else {
+                c.command({"set", "target-colorspace-hint-mode", "source"});
+                c.command({"set", "target-peak", "auto"});  // a peak would tone map even now
+                c.command({"set", "hdr-compute-peak", "no"});
+            }
+            save(f, "hdr", "fit_to_screen", want ? "1" : "0");
+        }
+        if (!fit) {
+            note("Off: set the console's HDR calibration while playing here. On: for highlights that clip to white.");
+            return;
+        }
+        ImGui::Indent();
+        if (slider("Screen peak", "##hdr_peak", &g_menu.hdr_peak.value, 100, 4000, "%d nits", 50)) {
+            g_menu.hdr_peak.changed(now);
+            c.command({"set", "target-peak", std::to_string(g_menu.hdr_peak.value)});
+            // A step with the keys is kept at once, a drag when it ends.
+            if (!ImGui::IsItemActive()) save(f, "hdr", "display_peak_nits", std::to_string(g_menu.hdr_peak.value));
+        }
+        if (ImGui::IsItemActive()) g_menu.hdr_peak.changed(now);
+        if (ImGui::IsItemDeactivatedAfterEdit())
+            save(f, "hdr", "display_peak_nits", std::to_string(g_menu.hdr_peak.value));
+    }
+
+    // Tone mapping (fitting, or SDR output): the curve, and the peak it
+    // starts from. mpv's "auto" is its spline.
+    static const char *const kCurves[] = {"bt.2390", "spline", "bt.2446a", "st2094-40", "hable", "clip"};
+    int current = mpv.tone_mapping == "auto" ? 1 : -1;
+    for (int i = 0; i < 6; ++i)
+        if (mpv.tone_mapping == kCurves[i]) current = i;
+    const int curve = radio_row("Curve", {"BT.2390", "Spline", "BT.2446a", "ST 2094-40", "Hable", "Clip"}, current);
+    if (curve >= 0) {
+        c.command({"set", "tone-mapping", kCurves[curve]});
+        save(f, "hdr", "tone_mapping", kCurves[curve]);
+    }
+    bool measure = mpv.compute_peak;
+    if (ImGui::Checkbox("Measure each frame's peak", &measure)) {
+        g_menu.hdr_dynamic = measure ? 1 : 0;
+        c.command({"set", "hdr-compute-peak", measure ? "yes" : "no"});
+        save(f, "hdr", "dynamic_peak", measure ? "1" : "0");
+    }
+    if (out_hdr) ImGui::Unindent();
+}
+
 void display(const MenuFrame &f, const MpvState &mpv) {
     section("DISPLAY");
     // Glasir moves mpv's window (and the black around a picture of another
@@ -269,6 +359,7 @@ void display(const MenuFrame &f, const MpvState &mpv) {
     }
     const bool hdr = f.source_hdr;
     if (!hdr && !f.hdr_available) return;  // a card without HDR modes: nothing to switch to
+    if (hdr) hdr_controls(f, mpv, ImGui::GetTime());
     if (ImGui::Button(hdr ? "Switch to SDR" : "Switch to HDR", ImVec2(-1, 0))) {
         // Glasir starts the picture again in the other mode (mpv's exit
         // code 42 asks for that).

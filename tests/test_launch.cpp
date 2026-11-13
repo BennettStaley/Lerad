@@ -196,10 +196,11 @@ int main() {
         s.hdr = true;
         plan.layout.format = PixelFormat::P010;
         plan.fps = 59.94;
+        plan.display.found = plan.display.hdr_supported = plan.display.hdr_on = true;
         args = mpv_arguments(plan, s);
         expect(has(args, L"--demuxer-rawvideo-mp-format=p010") && has(args, L"--demuxer-rawvideo-fps=59.94") &&
                    has(args, L"--d3d11-output-csp=pq") && has(args, L"--target-colorspace-hint=yes"),
-               "HDR P010: PQ output");
+               "HDR P010 on a screen with HDR on: PQ output (test_hdr has the rest)");
         s.hdr = false;
         plan.raw = false;
         plan.dshow_device = L"USB Video";

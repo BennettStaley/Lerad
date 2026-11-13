@@ -24,8 +24,11 @@ for Windows 11 · [How to install](#-installing)
 
 - **30 fps games, smooth at 60.** Motion-compensated frame generation
   (30 → 60, 60 → 120 fps) on any GPU: NVIDIA, AMD or Intel.
-- **HDR that looks right from the start.** SDR and HDR from the same app,
-  switched in the menu, with nothing to calibrate.
+- **HDR as the console sends it.** HDR10 goes to an HDR screen untouched,
+  so the console's own HDR calibration fits your screen; on a screen
+  without HDR (or with HDR off in Windows) it is tone mapped to SDR
+  instead of looking washed out. SDR and HDR from the same app, switched
+  in the menu.
 - **DLSS 5 neural rendering** on NVIDIA RTX 30, 40 and 50 series GPUs.
 - **Sharper than the card sends it.** A 1080p capture scaled up to your
   screen by a neural network, not just stretched (see [Scaling](#scaling)).
@@ -270,6 +273,7 @@ Testing without a capture card (needs ffmpeg and Python):
 ```
 python tools\smoke_raw.py                    # NV12, a 30 fps game captured at 60
 python tools\smoke_raw.py --format p010 --hdr
+python tools\hdr_check.py                    # HDR end to end: what mpv really puts out (no ffmpeg; needs numpy)
 python tools\probe.py --set video.mode=hdr   # with a real card, in a small window
 ```
 

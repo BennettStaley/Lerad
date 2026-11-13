@@ -55,12 +55,41 @@ generation falls short of double, and the option is better off.
 
 ## HDR
 
-- HDR needs HDR on the console, HDR on in Windows (Settings, Display) and one
-  of the card's 10-bit modes. Glasir's window lists the card's HDR modes when
-  HDR is chosen, and marks them with "HDR" in SDR.
+- HDR needs HDR on the console and one of the card's 10-bit modes. Glasir's
+  window lists the card's HDR modes when HDR is chosen, and marks them with
+  "HDR" in SDR.
 - Cards often offer HDR only at some sizes and rates; the Live Gamer Ultra
   2.1, for example, has 4K HDR only at 30 fps but 1440p HDR at 60.
 - Switch between SDR and HDR in the menu; the picture starts again.
+- The menu (Tab), under Display, says what is done with the HDR picture:
+  - **"HDR10 to the screen, as the console sends it"**: Windows has HDR on
+    for the screen (Settings, System, Display, "Use HDR"), and the picture
+    goes out untouched.
+  - **"HDR tone mapped to SDR"**, with the reason: the screen has no HDR, or
+    HDR is off in Windows. The picture is brought down to SDR so that it
+    looks right, without HDR's highlights. Turn "Use HDR" on in Windows and
+    start the picture again to get HDR. `[hdr] output = hdr` or `sdr` in
+    glasir.ini decides it yourself, if Glasir reads the screen wrong.
+- **Highlights clip to white, or the picture is too dim or too bright.** Set
+  the console's HDR calibration (PS5: Settings, Screen and Video, Adjust
+  HDR; Switch 2 and Xbox have the same) while playing through Glasir, as
+  you would on a TV: the console then sends what this screen can show. Set
+  `[video] hdr_peak_nits` in glasir.ini to the peak you ended up with if
+  you know it.
+- **A console that cannot be calibrated to the screen**: tick "Fit highlights
+  to this screen" in the menu. Glasir then brings highlights brighter than
+  the screen down to its peak and leaves the rest as it is. "Screen peak"
+  starts at what the screen reports to Windows, which is often too low (a
+  1000 nit screen reporting 400): raise it until bright highlights stop
+  gaining detail. "Measure each frame's peak" suits games that never reach
+  the peak they announce, for some GPU time. These are `[hdr]
+  fit_to_screen`, `display_peak_nits`, `tone_mapping` and `dynamic_peak` in
+  glasir.ini.
+- **The menu is too bright or too dim in HDR.** Its white follows Windows'
+  "SDR content brightness" for the screen (Settings, System, Display, HDR);
+  `[hdr] paper_white_nits` sets it yourself.
+- **An SDR game with HDR on in Windows** is shown like any SDR window, at
+  Windows' "SDR content brightness".
 
 ## The picture is soft or scaled
 

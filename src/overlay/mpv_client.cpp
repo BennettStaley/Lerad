@@ -14,6 +14,8 @@ namespace {
 const char *const kProperties[] = {
     "volume", "mute", "fullscreen", "user-data/glasir/audio-boost", "user-data/glasir/audio-delay", "width", "height",
     "user-data/glasir/scaling", "osd-dimensions",
+    // HDR (ids 10 to 14).
+    "target-colorspace-hint-mode", "target-peak", "tone-mapping", "hdr-compute-peak", "video-target-params",
 };
 
 int to_int(const Json &v, int fallback) {
@@ -156,6 +158,19 @@ void MpvClient::on_line(const std::string &line) {
             return v ? int(v->number()) : 0;
         };
         state_.osd = {field("w"), field("h"), field("ml"), field("mt"), field("mr"), field("mb")};
+        break;
+    }
+    case 9: state_.hint_mode = data && data->is(Json::Type::String) ? data->string() : ""; break;
+    case 10: state_.target_peak = data ? to_int(*data, 0) : 0; break;  // "auto": 0
+    case 11: state_.tone_mapping = data && data->is(Json::Type::String) ? data->string() : ""; break;
+    case 12:  // yes and no come as a boolean, "auto" as a string
+        state_.compute_peak = data && data->is(Json::Type::Bool) && data->boolean();
+        break;
+    case 13: {
+        const Json *gamma = data ? data->get("gamma") : nullptr;
+        const Json *peak = data ? data->get("max-luma") : nullptr;
+        state_.out_gamma = gamma && gamma->is(Json::Type::String) ? gamma->string() : "";
+        state_.out_peak = peak ? peak->number(0) : 0;
         break;
     }
     default: break;

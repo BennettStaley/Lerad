@@ -24,14 +24,21 @@ struct Settings {
     // How the capture is scaled up to the window (glasir_scaling.lua).
     enum class Scaling { Mpv, Fsr, Vsr, Cnn, Anime4k };
     Scaling scaling = Scaling::Mpv;
-    // [hdr]: what is done with an HDR capture (video.mode = hdr).
+    // [hdr]: what is done with an HDR capture (video.mode = hdr). hdr.h
+    // (hdr_plan) says what these come to on a given screen.
     // Auto: HDR10 to the screen when Windows has HDR on for it, else tone
     // mapped to SDR. Hdr / Sdr: always that.
     enum class HdrOutput { Auto, Hdr, Sdr };
     HdrOutput hdr_output = HdrOutput::Auto;
-    int display_peak_nits = 0;           // 0: what the screen reports to Windows
-    std::wstring tone_mapping = L"auto"; // mpv's --tone-mapping (tone_mapping_names())
-    bool hdr_dynamic_peak = false;       // measure each frame's peak (mpv's --hdr-compute-peak)
+    // HDR output: false, the picture goes out as the console sends it (the
+    // console's HDR calibration sets the peak); true, mpv fits it to the
+    // screen's peak (display_peak_nits) with tone_mapping.
+    bool hdr_fit_to_screen = false;
+    int display_peak_nits = 0;           // fitting: the screen's peak; 0: what the screen reports to Windows
+    // Fitting and SDR output: mpv's --tone-mapping (tone_mapping_names());
+    // auto: bt.2390 when fitting, mpv's own (spline) for SDR (hdr_tone_mapping).
+    std::wstring tone_mapping = L"auto";
+    bool hdr_dynamic_peak = false;       // fitting and SDR output: measure each frame's peak (mpv's --hdr-compute-peak)
     int paper_white_nits = 0;            // the menu's white in HDR; 0: Windows' SDR brightness, else 203
     // [display]
     enum class Vrr { Auto, On, Off };

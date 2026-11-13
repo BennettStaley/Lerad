@@ -20,6 +20,12 @@ struct MenuFrame {
     std::wstring settings_path;  // glasir.ini, where the menu keeps what it changes ("" = nowhere)
     bool source_hdr = false;     // the capture is HDR (glasir.ini video.mode), whatever mpv outputs
     bool hdr_available = true;   // the card has an HDR mode (false: no "Switch to HDR")
+    // An HDR capture, as Glasir started mpv (its hdr.h, through the
+    // environment); what mpv does now comes from MpvState.
+    std::string hdr_output;        // "hdr": HDR10 to the screen; "sdr": tone mapped; "": not said
+    std::string hdr_why;           // "sdr": why ("HDR is off in Windows")
+    int hdr_peak_nits = 0;         // the screen's peak fitting uses (glasir.ini's, else the screen's); 0: unknown
+    bool hdr_dynamic_peak = false; // glasir.ini hdr.dynamic_peak
     bool borderless = true;      // glasir.ini window.mode when mpv started (the menu follows its own switches)
     float scale = 1;             // 1 at 1080 lines
 };

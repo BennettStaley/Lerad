@@ -17,6 +17,11 @@ glasir_component(test_launch)
 target_link_libraries(test_launch PRIVATE glasir_app_core shell32)
 add_test(NAME launch COMMAND test_launch)
 
+add_executable(test_hdr test_hdr.cpp)
+glasir_component(test_hdr)
+target_link_libraries(test_hdr PRIVATE glasir_app_core)
+add_test(NAME hdr COMMAND test_hdr)
+
 add_executable(test_audio test_audio.cpp)
 glasir_component(test_audio)
 target_link_libraries(test_audio PRIVATE glasir_capture)
