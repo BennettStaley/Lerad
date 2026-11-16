@@ -405,10 +405,11 @@ struct Launcher {
     int tab = kTabPlay;
     bool dlss5_installed = false;
     std::string versions;  // "mpv 20261031  ·  ReShade 6.8.0  ·  DLSS 5 10.8.0", "" if none
+    bool other_versions = false;  // not the ones this Glasir was tested with: Update installs those
     const LauncherExtras *extras = nullptr;
     Release release;  // the newer Glasir, once the update check found one
     BugReport *bug = nullptr;
-    float body_height = 0;     // what the open tab needs, in pixels
+    float body_height = 0;    // what the open tab needs, in pixels
     float footer_height = 0;   // what the part that is always shown needs
     float content_height = 0;  // what the window needs
     LauncherAction action = LauncherAction::Quit;
@@ -427,9 +428,14 @@ Card find_card(const Launcher &s) {
     Card c;
     if (!s.found) return c;
     ModeRequest request;
-    request.hdr = s.now.hdr;
+    request.hdr = s.now.hdr && !s.now.hdr_auto;
     request.max_auto_height = s.system.display.found ? UINT32(s.system.display.height) : 0;
     c.automatic = choose_device(s.found->devices, L"", request);
+    if (!c.automatic && s.now.hdr_auto) {
+        // A card whose only modes are 10-bit (main.cpp does the same).
+        request.hdr = true;
+        c.automatic = choose_device(s.found->devices, L"", request);
+    }
     c.device = s.now.device.empty() ? c.automatic : nullptr;
     for (const auto &d : s.found->devices)
         if (!s.now.device.empty() && names_match(d.name, s.now.device)) c.device = &d;
@@ -607,6 +613,9 @@ void tab_play(Launcher &s) {
     } else {
         const Card card = find_card(s);
         const CaptureDevice *device = card.device;
+        // Automatic watches the signal in the card's 10-bit mode, if it has one.
+        const bool ten_bit_modes = device && !modes_for(device, true).empty();
+        const bool ten_bit = c.hdr_auto ? ten_bit_modes : c.hdr;
         row("Card");
         const std::string auto_label = card.automatic ? "Automatic (" + utf8(card.automatic->name) + ")"
                                                       : std::string("Automatic (none found yet)");
@@ -633,25 +642,33 @@ void tab_play(Launcher &s) {
 
         // HDR only where the card has a 10-bit mode (a choice already made
         // stays, so it can be seen and changed).
-        const bool no_hdr = device && modes_for(device, true).empty();
+        const bool no_hdr = device && !ten_bit_modes;
+        const bool said_hdr = !c.hdr_auto && c.hdr;
         row("Picture");
-        if (ImGui::RadioButton("SDR", !c.hdr)) c.hdr = false;
+        if (ImGui::RadioButton("Automatic", c.hdr_auto)) c.hdr_auto = true, c.hdr = false;
         ImGui::SameLine();
-        if (no_hdr && !c.hdr) ImGui::BeginDisabled();
-        if (ImGui::RadioButton("HDR", c.hdr)) c.hdr = true;
-        if (no_hdr && !c.hdr) ImGui::EndDisabled();
-        dim(no_hdr   ? "HDR needs a card with a 10-bit mode: this one has none."
-            : c.hdr  ? "HDR needs HDR on the console. Only the card's HDR (10-bit) modes are listed."
-                     : "Modes marked HDR can also be played in HDR.");
+        if (ImGui::RadioButton("SDR", !c.hdr_auto && !c.hdr)) c.hdr_auto = c.hdr = false;
+        ImGui::SameLine();
+        if (no_hdr && !said_hdr) ImGui::BeginDisabled();
+        if (ImGui::RadioButton("HDR", said_hdr)) c.hdr_auto = false, c.hdr = true;
+        if (no_hdr && !said_hdr) ImGui::EndDisabled();
+        if (c.hdr_auto)
+            dim(!no_hdr ? "SDR or HDR, as the console sends it: Glasir tells from the picture, in the card's 10-bit "
+                          "modes. Only those are listed."
+                        : "This card has no 10-bit mode: SDR.");
+        else
+            dim(no_hdr  ? "HDR needs a card with a 10-bit mode: this one has none."
+                : c.hdr ? "HDR needs HDR on the console. Only the card's HDR (10-bit) modes are listed."
+                        : "Modes marked HDR can also be played in HDR.");
 
-        const auto modes = modes_for(device, c.hdr);
+        const auto modes = modes_for(device, ten_bit);
         bool mode_ok = c.width == 0;
         for (const auto &m : modes)
             mode_ok = mode_ok || (m.width == c.width && m.height == c.height && std::abs(m.fps - c.fps) < 0.01);
         if (!mode_ok && device) c.width = c.height = 0, c.fps = 0;  // not offered here: back to automatic
         // What automatic picks: for the screen Glasir plays on.
         ModeRequest request;
-        request.hdr = c.hdr;
+        request.hdr = ten_bit;
         request.max_auto_height = s.system.display.found ? UINT32(s.system.display.height) : 0;
         const auto picked = device ? choose_mode(device->modes, request) : std::nullopt;
         const std::string auto_mode =
@@ -659,13 +676,13 @@ void tab_play(Launcher &s) {
         row("Mode");
         const std::string mode_label = c.width ? mode_text(c.width, c.height, c.fps) : auto_mode;
         if (ImGui::BeginCombo("##mode", mode_label.c_str())) {
-            const bool auto_hdr = !c.hdr && picked && has_hdr(device, picked->width, picked->height, picked->fps);
+            const bool auto_hdr = !ten_bit && picked && has_hdr(device, picked->width, picked->height, picked->fps);
             if (mode_item(auto_mode, c.width == 0, auto_hdr)) c.width = c.height = 0, c.fps = 0;
             int id = 0;
             for (const auto &m : modes) {
                 const bool on = m.width == c.width && m.height == c.height && std::abs(m.fps - c.fps) < 0.01;
                 ImGui::PushID(id++);
-                if (mode_item(mode_text(m.width, m.height, m.fps), on, !c.hdr && has_hdr(device, m.width, m.height, m.fps))) {
+                if (mode_item(mode_text(m.width, m.height, m.fps), on, !ten_bit && has_hdr(device, m.width, m.height, m.fps))) {
                     c.width = m.width;
                     c.height = m.height;
                     c.fps = m.fps;
@@ -716,9 +733,14 @@ void tab_play(Launcher &s) {
 void tab_hdr(Launcher &s) {
     Settings &c = s.now;
     heading("AN HDR CAPTURE");
-    if (!c.hdr) dim("The capture is SDR (Picture, on the Play tab). These apply to an HDR capture.");
-    if (!c.hdr) ImGui::BeginDisabled();
-    const HdrPlan plan = hdr_plan(c, s.system.display);
+    // Picture: Automatic can turn out either way, so both halves apply.
+    const bool hdr = c.hdr || c.hdr_auto;
+    const bool sdr = !c.hdr || c.hdr_auto;
+    if (!hdr) dim("The capture is SDR (Picture, on the Play tab). These apply to an HDR capture.");
+    if (!hdr) ImGui::BeginDisabled();
+    Settings as_hdr = c;
+    as_hdr.hdr = true;
+    const HdrPlan plan = hdr_plan(as_hdr, s.system.display);
     const bool to_sdr = plan.output == HdrPlan::Output::Sdr;
 
     row("Send it as", true);
@@ -730,13 +752,13 @@ void tab_hdr(Launcher &s) {
             if (ImGui::Selectable(outputs[i], i == current)) c.hdr_output = values[i];
         ImGui::EndCombo();
     }
-    if (c.hdr && s.system_known) dim("Now: " + utf8(hdr_plan_text(plan)) + ".");
+    if (hdr && s.system_known) dim("Now: " + utf8(hdr_plan_text(plan)) + ".");
 
     // Fitting: only for HDR output; SDR output is always tone mapped.
     if (to_sdr) ImGui::BeginDisabled();
     ImGui::Checkbox("Fit highlights to this screen", &c.hdr_fit_to_screen);
     if (to_sdr) ImGui::EndDisabled();
-    if (c.hdr && to_sdr)
+    if (hdr && to_sdr)
         dim("Not used: the picture is tone mapped to SDR, which fits it already.");
     else if (!c.hdr_fit_to_screen)
         dim("Off: the picture goes out as the console sends it; its own HDR calibration fits it to the screen. On: "
@@ -794,18 +816,18 @@ void tab_hdr(Launcher &s) {
     }
     dim("The brightest the console's picture gets: what its HDR calibration is set to. It goes into the HDR "
         "metadata sent to the screen.");
-    if (!c.hdr) ImGui::EndDisabled();
+    if (!hdr) ImGui::EndDisabled();
     advice_here(s, AdvicePlace::Hdr);
 
     heading("AN SDR CAPTURE");
-    if (c.hdr) ImGui::BeginDisabled();
+    if (!sdr) ImGui::BeginDisabled();
     row("Range", true);
     if (ImGui::RadioButton("Limited (most consoles)", !c.sdr_full_range)) c.sdr_full_range = false;
     ImGui::SameLine();
     if (ImGui::RadioButton("Full", c.sdr_full_range)) c.sdr_full_range = true;
-    if (c.hdr) ImGui::EndDisabled();
-    dim(c.hdr ? "Not used: the capture is HDR."
-              : "As the console's RGB range is set. Wrong: blacks look grey, or dark detail is crushed.");
+    if (!sdr) ImGui::EndDisabled();
+    dim(!sdr ? "Not used: the capture is HDR."
+             : "As the console's RGB range is set. Wrong: blacks look grey, or dark detail is crushed.");
 }
 
 void tab_framegen(Launcher &s) {
@@ -1012,9 +1034,14 @@ void footer(Launcher &s) {
     dim(s.versions.empty() ? "mpv and ReShade are downloaded when you press Play." : s.versions);
     if (!s.versions.empty()) {
         ImGui::SameLine();
-        if (ImGui::SmallButton("Update")) {
+        if (ImGui::SmallButton(s.other_versions ? "Update" : "Download again")) {
             s.action = LauncherAction::Setup;
             s.finished = true;
+        }
+        if (s.other_versions) {
+            ImGui::PushStyleColor(ImGuiCol_Text, ui::kGold);
+            ImGui::TextWrapped("This Glasir was tested with other versions of these. Update installs them.");
+            ImGui::PopStyleColor();
         }
     }
     if (s.extras && s.extras->update && s.extras->update->state() == UpdateCheck::State::Available) {
@@ -1165,6 +1192,9 @@ LauncherAction run_launcher(const std::wstring &settings_path, const std::wstrin
     launcher.engine_dir = engine_dir;
     launcher.dlss5_installed = component_installed(engine_dir, Component::Dlss5);
     launcher.versions = versions_line(engine_dir);
+    for (Component c : {Component::Mpv, Component::ReShade, Component::Dlss5})
+        launcher.other_versions =
+            launcher.other_versions || (component_installed(engine_dir, c) && !component_as_tested(engine_dir, c));
     launcher.extras = &extras;
     launcher.bug = &bug;
     float style_scale = 0;

@@ -18,7 +18,8 @@ struct MenuFrame {
     MpvClient *mpv = nullptr;
     Encoding encoding = Encoding::Sdr;
     std::wstring settings_path;  // glasir.ini, where the menu keeps what it changes ("" = nowhere)
-    bool source_hdr = false;     // the capture is HDR (glasir.ini video.mode), whatever mpv outputs
+    bool source_hdr = false;     // the capture is shown as HDR, whatever mpv outputs
+    bool source_auto = false;    // glasir.ini video.mode = auto: SDR or HDR as the signal turns out to be
     bool hdr_available = true;   // the card has an HDR mode (false: no "Switch to HDR")
     // An HDR capture, as Glasir started mpv (its hdr.h, through the
     // environment); what mpv does now comes from MpvState.

@@ -100,7 +100,20 @@ struct ShownRate {
     int better_hz = 0;
 };
 
+// What video.mode comes to with a card's modes, as Glasir.exe settles it when
+// it plays (main.cpp open_source). sdr and hdr are as said. auto captures in
+// the card's 10-bit mode for the size and rate asked, if it has one, and
+// starts as what the signal was last time (video.auto_found); without such a
+// mode it is SDR.
+struct VideoKind {
+    bool ten_bit = false;  // the capture is one of the card's 10-bit (P010) modes
+    bool hdr = false;      // the picture is shown as HDR (to start with, for auto)
+};
+VideoKind video_kind(const Settings &s, const std::vector<VideoMode> &modes, UINT32 max_auto_height);
+
 struct Outcome {
+    // SDR or HDR, with video.mode = auto settled for this card.
+    VideoKind video;
     // The capture mode Glasir will open, if the card has one for the settings.
     bool capture_known = false;
     VideoMode capture;

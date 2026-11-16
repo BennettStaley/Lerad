@@ -82,7 +82,10 @@ std::vector<SummaryLine> summary_lines(const AdviceInput &in, const Advice &advi
                          !unreadable});
     } else {
         lines.push_back({std::format(L"{}: {} x {} at {} fps, {}{}.", in.card, o.capture.width, o.capture.height,
-                                     number(o.capture.fps), s.hdr ? L"HDR" : L"SDR",
+                                     number(o.capture.fps),
+                                     s.hdr_auto && o.video.ten_bit ? (o.video.hdr ? L"HDR or SDR as the console sends it"
+                                                                                  : L"SDR or HDR as the console sends it")
+                                                                   : o.video.hdr ? L"HDR" : L"SDR",
                                      o.media_foundation ? L"" : L", through DirectShow"),
                          false});
     }
@@ -109,7 +112,7 @@ std::vector<SummaryLine> summary_lines(const AdviceInput &in, const Advice &advi
     }
 
     // HDR.
-    if (s.hdr) {
+    if (o.video.hdr) {
         const HdrPlan &p = o.hdr_plan;
         const bool as_asked = p.output == HdrPlan::Output::Hdr ? !p.forced_without_hdr
                                                                : s.hdr_output == Settings::HdrOutput::Sdr;

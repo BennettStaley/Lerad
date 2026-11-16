@@ -19,17 +19,18 @@ std::wstring fps_text(double fps) {
 }
 
 // The colour tags raw frames need: they carry none of their own. SDR from
-// consoles is BT.709; NV12 from cards is sited top-left, 4:2:2 left. HDR is
-// HDR10 (BT.2020, PQ, limited range) with the peak from glasir.ini as its
-// mastering peak and MaxCLL: mpv passes them on as the swap chain's metadata
-// and starts tone mapping from them. glasir_scaling.lua puts the same tags
-// back after the GPU's video super resolution.
+// consoles is BT.709; 4:2:0 from cards (NV12, and P010 with an SDR signal in
+// it) is sited top-left, 4:2:2 left. HDR is HDR10 (BT.2020, PQ, limited
+// range) with the peak from glasir.ini as its mastering peak and MaxCLL: mpv
+// passes them on as the swap chain's metadata and starts tone mapping from
+// them. glasir_scaling.lua puts the same tags back after the GPU's video
+// super resolution.
 std::wstring colour_filter(const MpvPlan &plan, const Settings &s) {
     if (s.hdr)
         return std::format(L"format=colormatrix=bt.2020-ncl:colorlevels=limited:primaries=bt.2020:gamma=pq:"
                            L"max-luma={0}:max_cll={0}",
                            s.hdr_peak_nits);
-    const wchar_t *siting = plan.layout.format == PixelFormat::NV12 ? L"uhd" : L"mpeg2/4/h264";
+    const wchar_t *siting = is_planar(plan.layout.format) ? L"uhd" : L"mpeg2/4/h264";
     return std::format(L"format=colormatrix=bt.709:colorlevels={}:primaries=bt.709:chroma-location={}",
                        s.sdr_full_range ? L"full" : L"limited", siting);
 }

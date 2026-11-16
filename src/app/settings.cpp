@@ -82,8 +82,14 @@ bool apply(Settings &s, const std::wstring &section, const std::wstring &key, co
         else return bad(L"auto, mediafoundation or directshow");
     } else if (name == L"video.mode") {
         const std::wstring l = lower(value);
-        if (l == L"sdr") s.hdr = false;
-        else if (l == L"hdr") s.hdr = true;
+        if (l == L"sdr") s.hdr = false, s.hdr_auto = false;
+        else if (l == L"hdr") s.hdr = true, s.hdr_auto = false;
+        else if (l == L"auto") s.hdr_auto = true, s.hdr = false;
+        else return bad(L"auto, sdr or hdr");
+    } else if (name == L"video.auto_found") {
+        const std::wstring l = lower(value);
+        if (l == L"sdr") s.auto_found_hdr = false;
+        else if (l == L"hdr") s.auto_found_hdr = true;
         else return bad(L"sdr or hdr");
     } else if (name == L"video.sdr_range") {
         const std::wstring l = lower(value);
@@ -271,8 +277,14 @@ fps = 0
 path = auto
 
 [video]
-; sdr or hdr. HDR needs a card with a 10-bit (P010) mode and HDR on the console.
-mode = sdr
+; auto, sdr or hdr. auto: Glasir captures in the card's 10-bit (P010) mode,
+; tells from the picture whether the console sends SDR or HDR, and follows it
+; when that changes (the picture starts again); a card without a 10-bit mode
+; is SDR. sdr and hdr say it yourself: hdr needs a 10-bit mode and HDR on the
+; console, sdr also offers the card's 8-bit modes (often larger or faster).
+mode = auto
+; What auto found the last time (Glasir writes this): how it starts.
+auto_found = hdr
 ; The SDR signal's range: limited (most consoles) or full.
 sdr_range = limited
 ; The brightest the console's HDR picture gets (nits): what its HDR
@@ -517,7 +529,8 @@ std::vector<SettingValue> changed_settings(const Settings &from, const Settings 
         put(L"capture", L"fps", number(to.fps));
     }
     if (to.path != from.path) put(L"capture", L"path", path_name(to.path));
-    if (to.hdr != from.hdr) put(L"video", L"mode", to.hdr ? L"hdr" : L"sdr");
+    if (to.hdr_auto != from.hdr_auto || (!to.hdr_auto && to.hdr != from.hdr))
+        put(L"video", L"mode", to.hdr_auto ? L"auto" : to.hdr ? L"hdr" : L"sdr");
     if (to.sdr_full_range != from.sdr_full_range) put(L"video", L"sdr_range", to.sdr_full_range ? L"full" : L"limited");
     if (to.hdr_peak_nits != from.hdr_peak_nits) put(L"video", L"hdr_peak_nits", std::to_wstring(to.hdr_peak_nits));
     if (to.scaling != from.scaling) put(L"video", L"scaling", scaling_name(to.scaling));

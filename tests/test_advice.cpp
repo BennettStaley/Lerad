@@ -68,10 +68,12 @@ GpuInfo gpu(const wchar_t *name, unsigned vendor, unsigned mb, bool with_screen 
     return g;
 }
 
-// A desktop with one RTX 5090, the Elgato and default settings.
+// A desktop with one RTX 5090, the Elgato and default settings, but SDR said
+// (video.mode is auto by default; the tests of it say so).
 AdviceInput desktop(const DisplayInfo &d) {
     AdviceInput in;
     in.settings.dlss5 = Settings::Dlss5::Auto;  // asked for (it is off by default)
+    in.settings.hdr_auto = false;
     in.display = d;
     in.gpus = {gpu(L"NVIDIA GeForce RTX 5090", kVendorNvidia, 32000)};
     in.gpu = choose_gpu(in.gpus, d.device, L"");
@@ -151,6 +153,26 @@ int main() {
                    text.find(L"a 60 fps game at 120 fps (x2)") != std::wstring::npos &&
                    text.find(L"(rec-scaling)") != std::wstring::npos,
                "the advice as text");
+    }
+    {
+        // video.mode = auto: the card's 10-bit mode for what is asked, shown
+        // as the signal was last time; SDR on a card without one.
+        AdviceInput in = desktop(screen(3840, 2160, 120));
+        for (const wchar_t *o : {L"video.mode=auto", L"capture.width=3840", L"capture.height=2160", L"capture.fps=30"})
+            apply_override(in.settings, o, error);
+        Advice a = advise(in);
+        expect(a.outcome.video.ten_bit && a.outcome.video.hdr && is(a.outcome.capture, L"P010", 3840, 2160, 30) &&
+                   a.outcome.hdr == Outcome::Hdr::Hdr,
+               "auto, HDR found last time: P010 3840x2160 at 30, sent as HDR");
+        apply_override(in.settings, L"video.auto_found=sdr", error);
+        a = advise(in);
+        expect(a.outcome.video.ten_bit && !a.outcome.video.hdr && is(a.outcome.capture, L"P010", 3840, 2160, 30) &&
+                   a.outcome.hdr == Outcome::Hdr::SdrCapture,
+               "auto, SDR found last time: still the 10-bit mode, shown as SDR");
+        in.modes = {mode(L"NV12", 3840, 2160, 30), mode(L"NV12", 1920, 1080, 60)};
+        a = advise(in);
+        expect(!a.outcome.video.ten_bit && !a.outcome.video.hdr && is(a.outcome.capture, L"NV12", 3840, 2160, 30),
+               "auto on a card without a 10-bit mode: SDR in NV12");
     }
     {
         // A 4K 120 Hz screen, HDR, PS5 at 4K30 through the card's only 4K HDR mode.

@@ -23,6 +23,12 @@ target_include_directories(glasir_app_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 # The frame generation add-on's pacing rules (a header): advice.cpp asks them
 # what will be shown rather than repeating them.
 target_include_directories(glasir_app_core PRIVATE "${PROJECT_SOURCE_DIR}/src/framegen")
+
+# The tested versions of the downloaded programs (components.json), built in.
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/components.json")
+file(READ components.json GLASIR_TESTED_COMPONENTS)
+configure_file(tested_components.h.in "${CMAKE_CURRENT_BINARY_DIR}/generated/tested_components.h" @ONLY)
+target_include_directories(glasir_app_core PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
 target_link_libraries(glasir_app_core PUBLIC glasir_capture glasir_common glasir_version dxgi cfgmgr32 winhttp bcrypt wintrust crypt32 version user32 ole32)
 
 configure_file(glasir.rc.in "${CMAKE_CURRENT_BINARY_DIR}/glasir.rc" @ONLY)

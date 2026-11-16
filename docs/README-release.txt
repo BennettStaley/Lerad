@@ -7,16 +7,19 @@ GETTING STARTED
    C:\Games\Glasir. Not "Program Files": Glasir keeps its settings, logs
    and screenshots in its own folder.
 2. Plug in your capture card and turn the console on.
-3. Start Glasir.exe. In its window, pick your card, SDR or HDR, and the
+3. Start Glasir.exe. In its window, pick your card, the picture (Automatic,
+   SDR or HDR), and the
    screen to play on. "What you will get" says what your choices come to
    on this PC, and "Set your console to" what to set on the console for
    them (resolution, HDR, 120 Hz output, VRR off). The HDR, Frame
    generation and Sound and window tabs hold the rest.
 4. Press Play. The first time, it asks to download the programs it runs on
    (mpv and ReShade, plus DLSS 5 on an NVIDIA RTX 30, 40 or 50 series GPU).
-   They come straight from their authors' sites; THIRD-PARTY-NOTICES.md lists
-   them and their licences.
-5. While playing, Tab opens the menu.
+   They come straight from their authors' sites, in the versions this
+   Glasir was tested with; THIRD-PARTY-NOTICES.md lists them and their
+   licences.
+5. While playing, Tab opens the menu. SDR or HDR is found by itself
+   ("Picture: Automatic"); the menu and Glasir's window can also say which.
 
 "Glasir.exe --system" prints what Glasir found on the PC and what your
 settings will do there.
@@ -28,7 +31,8 @@ there, and so is what you change in the menu (Tab).
 KEYS
 
   Tab                      the menu (Esc or Tab closes it): DLSS 5, frame
-                           generation, scaling, sound, full screen, SDR/HDR
+                           generation, scaling, sound, full screen, SDR,
+                           HDR or automatic
   double-click, f          full screen
   Up / Down, mouse wheel   volume
   m                        mute
@@ -53,7 +57,9 @@ When a newer Glasir is out, its window says so under Play: "Update Glasir"
 installs it (your settings stay). [update] check = 0 in glasir.ini stops
 Glasir from asking GitHub.
 
-  Update (in the window)   downloads the newest mpv, ReShade and DLSS 5
+  Update (in the window)   downloads mpv, ReShade and DLSS 5 in the versions
+                           this Glasir was tested with (it says when yours
+                           are others)
   Glasir.exe --setup       the same, from a command line
   Glasir.exe --update      installs the newest Glasir
 

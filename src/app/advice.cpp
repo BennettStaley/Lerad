@@ -43,7 +43,7 @@ std::wstring current(const Settings &s, const SettingValue &v) {
     if (name == L"capture.width") return std::to_wstring(s.width);
     if (name == L"capture.height") return std::to_wstring(s.height);
     if (name == L"capture.fps") return number(s.fps);
-    if (name == L"video.mode") return s.hdr ? L"hdr" : L"sdr";
+    if (name == L"video.mode") return s.hdr_auto ? L"auto" : s.hdr ? L"hdr" : L"sdr";
     if (name == L"video.scaling") return scaling_name(s.scaling);
     if (name == L"framegen.quality") return s.framegen_fast ? L"fast" : L"high";
     if (name == L"framegen.method") return s.framegen_blend ? L"blend" : L"motion";
@@ -71,10 +71,28 @@ int severity_rank(const AdviceItem &i) {
 
 std::wstring setting_text(const SettingValue &v) { return v.section + L"." + v.key + L"=" + v.value; }
 
+VideoKind video_kind(const Settings &s, const std::vector<VideoMode> &modes, UINT32 max_auto_height) {
+    if (!s.hdr_auto) return {s.hdr, s.hdr};
+    ModeRequest ten_bit;
+    ten_bit.hdr = true;
+    ten_bit.width = s.width;
+    ten_bit.height = s.height;
+    ten_bit.fps = s.fps;
+    ten_bit.max_auto_height = max_auto_height;
+    const bool found = s.path != Settings::CapturePath::DirectShow && choose_mode(modes, ten_bit).has_value();
+    return {found, found && s.auto_found_hdr};
+}
+
 Advice advise(const AdviceInput &in) {
     Advice a;
     Outcome &o = a.outcome;
-    const Settings &s = in.settings;
+    // video.mode = auto is settled first: from here s.hdr is what the picture
+    // is shown as, and picture.ten_bit which of the card's modes are captured.
+    const VideoKind picture = o.video =
+        video_kind(in.settings, in.modes, in.display.found ? UINT32(in.display.height) : 0);
+    Settings settled = in.settings;
+    settled.hdr = picture.hdr;
+    const Settings &s = settled;
     const DisplayInfo &d = in.display;
     const GpuInfo &gpu = in.gpu.gpu;
     using Sev = AdviceSeverity;
@@ -104,7 +122,7 @@ Advice advise(const AdviceInput &in) {
     // ------------------------------------------------------------ the capture
     // The mode, picked as Glasir.exe does when it plays (main.cpp open_source).
     ModeRequest request;
-    request.hdr = s.hdr;
+    request.hdr = picture.ten_bit;
     request.width = s.width;
     request.height = s.height;
     request.fps = s.fps;
@@ -113,7 +131,7 @@ Advice advise(const AdviceInput &in) {
     if (in.card_found) {
         if (s.path != Settings::CapturePath::DirectShow) mode = choose_mode(in.modes, request);
         o.media_foundation = mode.has_value();
-        if (!mode && !s.hdr && s.path != Settings::CapturePath::MediaFoundation) {
+        if (!mode && !picture.ten_bit && s.path != Settings::CapturePath::MediaFoundation) {
             ModeRequest any = request;
             any.supported_only = false;
             mode = choose_mode(in.modes, any);
@@ -146,7 +164,7 @@ Advice advise(const AdviceInput &in) {
     } else if (!mode && !in.modes.empty()) {
         // capture-no-mode: the size and rate asked for are not offered.
         limit("capture-no-mode", Sev::Problem,
-              card + L" has no " + (s.hdr ? L"HDR" : L"SDR") + L" mode of " + asked_text +
+              card + L" has no " + (picture.ten_bit ? L"HDR" : L"SDR") + L" mode of " + asked_text +
                   L". Automatic (0) picks one it has.",
               {{L"capture", L"width", L"0"}, {L"capture", L"height", L"0"}, {L"capture", L"fps", L"0"}});
     } else if (!o.media_foundation) {
@@ -183,7 +201,7 @@ Advice advise(const AdviceInput &in) {
         // What automatic picks for this screen: 60 fps first, then the
         // largest 16:9 size that fits.
         ModeRequest automatic;
-        automatic.hdr = s.hdr;
+        automatic.hdr = picture.ten_bit;
         automatic.max_auto_height = request.max_auto_height;
         const auto pick = choose_mode(in.modes, automatic);
         const bool same = pick && pick->width == mode->width && pick->height == mode->height &&
@@ -199,7 +217,7 @@ Advice advise(const AdviceInput &in) {
             // capture-30fps: a mode slower than 60 where the card has 60.
             limit("capture-30fps", Sev::Info,
                   L"The capture runs at " + number(mode->fps) + L" fps: a game faster than that loses frames. " +
-                      card + L" has " + mode_text(*pick) + (s.hdr ? L" in HDR." : L"."),
+                      card + L" has " + mode_text(*pick) + (picture.ten_bit ? L" in HDR." : L"."),
                   capture_settings(*pick));
         } else if (pick) {
             // rec-capture: the mode for this screen.
@@ -214,12 +232,12 @@ Advice advise(const AdviceInput &in) {
         // below 60 fps (HDR on many cards): a choice for 30 fps games.
         if (same && d.found && int(mode->height) < d.height) {
             const auto full = largest(in.modes, [&](const VideoMode &m) {
-                return (s.hdr ? hdr_format(m) : sdr_format(m)) && wide16x9(m) && int(m.height) <= d.height &&
+                return (picture.ten_bit ? hdr_format(m) : sdr_format(m)) && wide16x9(m) && int(m.height) <= d.height &&
                        m.height > mode->height && m.fps >= 29.0;
             });
             if (full && !rate60(*full))
                 recommend("capture-sharper-30",
-                          card + L" has " + mode_text(*full) + (s.hdr ? L" in HDR" : L"") +
+                          card + L" has " + mode_text(*full) + (picture.ten_bit ? L" in HDR" : L"") +
                               L": sharper on this screen for 30 fps games (a 60 fps game would lose half its "
                               L"frames).",
                           capture_settings(*full));
@@ -227,12 +245,12 @@ Advice advise(const AdviceInput &in) {
         // capture-120: a 120 fps mode for a 120 Hz screen.
         if (d.found && d.refresh_hz >= 118 && mode->fps < 100) {
             const auto fast = largest(in.modes, [&](const VideoMode &m) {
-                return (s.hdr ? hdr_format(m) : sdr_format(m)) && wide16x9(m) && m.fps >= 118 && m.fps <= 122 &&
+                return (picture.ten_bit ? hdr_format(m) : sdr_format(m)) && wide16x9(m) && m.fps >= 118 && m.fps <= 122 &&
                        int(m.height) <= d.height;
             });
             if (fast)
                 recommend("capture-120",
-                          card + L" can capture " + mode_text(*fast) + (s.hdr ? L" in HDR" : L"") +
+                          card + L" can capture " + mode_text(*fast) + (picture.ten_bit ? L" in HDR" : L"") +
                               L", for a console set to 120 Hz. Games at 60 fps or less gain nothing from it.",
                           capture_settings(*fast));
         }
