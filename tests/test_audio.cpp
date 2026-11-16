@@ -75,6 +75,9 @@ int main() {
     expect(card_base_name(L"Live Gamer Ultra 2.1-Video") == L"Live Gamer Ultra 2.1", "card name without -Video");
     expect(card_base_name(L"Game Capture HD60 X (Video)") == L"Game Capture HD60 X", "card name without (Video)");
     expect(card_base_name(L"USB Video") == L"USB", "card name without Video");
+    expect(card_base_name(L"Video (00 Pro Capture HDMI 4K+ LT)") == L"00 Pro Capture HDMI 4K+ LT",
+           "card name without Video (...)");
+    expect(card_base_name(L"Video Capture") == L"Video Capture", "a name that starts with Video stays");
 
     const GUID usb_card = {0x1234, 0x5678, 0x9abc, {1, 2, 3, 4, 5, 6, 7, 8}};
     const GUID headset = {0x9999, 0x5678, 0x9abc, {1, 2, 3, 4, 5, 6, 7, 8}};
@@ -84,6 +87,7 @@ int main() {
         {L"usb", L"Digital Audio Interface (USB Digital Audio)", usb_card},
         {L"lgu", L"HDMI/Line In (Live Gamer Ultra 2.1-Audio)", builtin},
         {L"elg", L"Game Capture 4K60 Pro MK.2 Audio", builtin},
+        {L"mw", L"Audio (00 Pro Capture HDMI 4K+ LT)", builtin},
     };
     auto pick = [&](const wchar_t *video, std::optional<GUID> container, const wchar_t *wanted) {
         const auto a = find_card_audio(inputs, video, container, wanted);
@@ -93,6 +97,7 @@ int main() {
     expect(pick(L"USB Video", std::nullopt, L"") == L"none", "USB card without container: not the headset mic");
     expect(pick(L"Live Gamer Ultra 2.1-Video", builtin, L"") == L"lgu", "built-in container: by name");
     expect(pick(L"Game Capture 4K60 Pro MK.2", builtin, L"") == L"elg", "PCIe card: by name");
+    expect(pick(L"Video (00 Pro Capture HDMI 4K+ LT)", builtin, L"") == L"mw", "Magewell PCIe card: by name");
     expect(pick(L"Live Gamer Ultra 2.1-Video", builtin, L"Headset") == L"mic", "glasir.ini names another input");
     expect(pick(L"Live Gamer Ultra 2.1-Video", builtin, L"No Such Input") == L"none", "glasir.ini input missing");
 

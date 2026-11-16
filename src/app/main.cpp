@@ -237,10 +237,20 @@ std::wstring device_list_text() {
         for (size_t i = 0; i < modes.size();) {
             const VideoMode &m = modes[i];
             text += std::format(L"  {:<5} {:>4}x{:<4} @", m.subtype, m.width, m.height);
+            // A driver that scales the rate itself (Magewell) may give one
+            // mode with a range of rates rather than a mode per rate.
+            double low = 0, high = 0;
             for (; i < modes.size() && modes[i].subtype == m.subtype && modes[i].width == m.width &&
                    modes[i].height == m.height;
-                 ++i)
+                 ++i) {
                 text += std::format(L" {}", std::round(modes[i].fps * 1000) / 1000);
+                if (modes[i].fps_max - modes[i].fps_min > 0.01) {
+                    low = low > 0 ? std::min(low, modes[i].fps_min) : modes[i].fps_min;
+                    high = std::max(high, modes[i].fps_max);
+                }
+            }
+            if (high > 0)
+                text += std::format(L"  (settable {} to {})", std::round(low * 1000) / 1000, std::round(high * 1000) / 1000);
             text += m.supported ? L"\n" : L"  (DirectShow only)\n";
         }
     }

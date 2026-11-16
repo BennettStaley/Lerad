@@ -88,6 +88,8 @@ VideoMode read_mode(IMFMediaType *type) {
     MFGetAttributeSize(type, MF_MT_FRAME_SIZE, &m.width, &m.height);
     MFGetAttributeRatio(type, MF_MT_FRAME_RATE, &num, &den);
     m.fps = den ? double(num) / den : 0.0;
+    if (SUCCEEDED(MFGetAttributeRatio(type, MF_MT_FRAME_RATE_RANGE_MIN, &num, &den)) && den) m.fps_min = double(num) / den;
+    if (SUCCEEDED(MFGetAttributeRatio(type, MF_MT_FRAME_RATE_RANGE_MAX, &num, &den)) && den) m.fps_max = double(num) / den;
     m.supported = format_from_guid(sub, m.format);
     m.subtype = subtype_name(sub);
     return m;

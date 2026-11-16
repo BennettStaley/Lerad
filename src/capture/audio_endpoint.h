@@ -29,7 +29,8 @@ std::optional<GUID> video_container(const std::wstring &symbolic_link);
 std::optional<AudioInput> find_card_audio(const std::vector<AudioInput> &inputs, const std::wstring &video_name,
                                           const std::optional<GUID> &container, const std::wstring &wanted);
 
-// "Live Gamer Ultra 2.1-Video" -> "Live Gamer Ultra 2.1"
+// "Live Gamer Ultra 2.1-Video" -> "Live Gamer Ultra 2.1";
+// "Video (00 Pro Capture HDMI 4K+)" -> "00 Pro Capture HDMI 4K+"
 std::wstring card_base_name(const std::wstring &video_name);
 
 }  // namespace glasir

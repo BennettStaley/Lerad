@@ -96,6 +96,16 @@ std::wstring card_base_name(const std::wstring &video_name) {
         else
             break;
     }
+    // And a leading one: Magewell's driver names the pair "Video (00 Pro
+    // Capture HDMI 4K+)" and "Audio (00 Pro Capture HDMI 4K+)".
+    // Only that bracketed form: "Video Capture" would leave "Capture".
+    if (base.size() > 5 && CompareStringOrdinal(base.c_str(), 5, L"Video", 5, TRUE) == CSTR_EQUAL) {
+        const size_t open = base.find_first_not_of(L' ', 5);
+        if (open != std::wstring::npos && base[open] == L'(') {
+            const std::wstring rest = trim(base.substr(open));
+            if (!rest.empty()) base = rest;
+        }
+    }
     return base;
 }
 

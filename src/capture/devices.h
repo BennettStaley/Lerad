@@ -20,6 +20,10 @@ struct VideoMode {
     std::wstring subtype;  // "NV12", "MJPG", ...
     UINT32 width = 0, height = 0;
     double fps = 0;
+    // The rates the driver says this mode can be set to, when it gives a
+    // range instead of one mode per rate (0: it does not say). Shown by
+    // --list only; Glasir asks for fps.
+    double fps_min = 0, fps_max = 0;
 };
 
 struct CaptureDevice {
