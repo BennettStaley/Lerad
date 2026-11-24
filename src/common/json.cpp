@@ -4,7 +4,7 @@
 #include <charconv>
 #include <cstdlib>
 
-namespace glasir {
+namespace app {
 namespace {
 const std::string kEmptyString;
 const std::vector<Json> kEmptyItems;
@@ -204,4 +204,4 @@ std::optional<Json> Json::parse(std::string_view text) {
     return out;
 }
 
-}  // namespace glasir
+}  // namespace app

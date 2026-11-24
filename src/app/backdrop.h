@@ -6,9 +6,9 @@
 // than the picture (a 16:9 console on an ultrawide), a full-screen mpv window
 // hands DLSS 5, frame generation and the menu the whole screen, bars
 // included: on 3440x1440 a quarter of the work is black. Instead mpv's window
-// is made the picture's size, centred, and a black window of Glasir's fills
+// is made the picture's size, centred, and a black window of the app's fills
 // the rest of the screen behind it. mpv keeps its own top-level window (a
-// child window inside Glasir's would lose VRR), but a window smaller than the
+// child window inside the app's would lose VRR), but a window smaller than the
 // monitor keeps independent flip only while Windows gives it an overlay
 // plane (MPO); without one it is composed and frame generation falls short.
 // So it is a choice, off by default.
@@ -21,7 +21,7 @@
 #include <thread>
 #include <vector>
 
-namespace glasir {
+namespace app {
 
 // The picture's place on a monitor: as large as fits with the source's
 // shape (square pixels), centred. The monitor itself when it has that shape.
@@ -32,11 +32,11 @@ RECT fit_picture(const RECT &monitor, UINT32 width, UINT32 height);
 RECT centre_window(const RECT &work, LONG width, LONG height);
 
 struct WindowSetup {
-    bool borderless = true;   // glasir.ini window.mode
+    bool borderless = true;   // the settings file's window.mode
     bool fullscreen = false;  // window.mode = fullscreen: mpv starts in its own full screen
-    bool skip_bars = false;   // glasir.ini window.skip_black_bars (full screen only)
+    bool skip_bars = false;   // the settings file's window.skip_black_bars (full screen only)
     UINT32 width = 0, height = 0;  // the picture; 0: unknown (full screen covers the screen)
-    // The screen to play on ("\\.\DISPLAY2", glasir.ini's display.monitor);
+    // The screen to play on ("\\.\DISPLAY2", the settings file's display.monitor);
     // empty: where mpv opens. mpv is told the same; if its window still
     // comes up on another screen, it is moved.
     std::wstring screen;
@@ -73,4 +73,4 @@ private:
     WindowSetup setup_;
 };
 
-}  // namespace glasir
+}  // namespace app

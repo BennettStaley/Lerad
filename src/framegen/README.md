@@ -1,10 +1,10 @@
-# Glasir frame generation
+# Lerad frame generation
 
 <!-- SPDX-License-Identifier: MPL-2.0 -->
 
 Frame generation inside mpv, with no second app running: the ReShade add-on
-`zz-glasir-framegen.addon64` (this folder, Mozilla Public License 2.0) and
-Glasir's dedup feeding it. This is the design document carried over from the
+`zz-framegen.addon64` (this folder, Mozilla Public License 2.0) and
+Lerad's dedup feeding it. This is the design document carried over from the
 prototype (MPV-SW-Capture's FrameGen work, 2026-10-24 to 10-31): the
 measurements below were taken there, with the same code. What was tried
 on the way, the research rounds, the depth experiment and the dead ends are
@@ -12,7 +12,7 @@ in [docs/FRAMEGEN-LEARNINGS.md](../../docs/FRAMEGEN-LEARNINGS.md).
 
 ## What it does
 
-1. **Dedup in `Glasir.exe`** (`[frames] dedup = 1`), which feeds mpv from the
+1. **Dedup in `Lerad.exe`** (`[frames] dedup = 1`), which feeds mpv from the
    card: 10-bit P010 for HDR, 8-bit NV12 (or YUY2/UYVY) for SDR.
    A 30 fps game captured at 60 arrives
    as pairs of identical frames (A A B B). With `--dedup` only new frames are
@@ -25,7 +25,7 @@ in [docs/FRAMEGEN-LEARNINGS.md](../../docs/FRAMEGEN-LEARNINGS.md).
    keep drawing on a still picture. `--dedup` also opens a link to the add-on
    (`framegen_link.h`) with each new frame's arrival time and how many new
    frames mpv had to drop.
-2. **`zz-glasir-framegen.addon64`**, a ReShade add-on that runs last, after the
+2. **`zz-framegen.addon64`**, a ReShade add-on that runs last, after the
    DLSS 5 pass. For each real frame B it shows a frame between the previous
    real frame A and B, then B half a frame later: 30 fps becomes 60, 60 becomes
    120. With `Multiplier=3` or `4` (an option, never the default) it shows two
@@ -39,15 +39,16 @@ from where it was in A and where it went in B. `Method=blend` gives the old
 
 ## Use
 
-Frame generation is on by default (`glasir.ini`: `[framegen] enabled = 1`)
+Frame generation is on by default (`lerad.ini`: `[framegen] enabled = 1`)
 and needs dedup (`[frames] dedup = 1`) and ReShade in `engine\`. **F8**
 toggles it while playing (mpv's OSD says ON/OFF); the next start follows
-`glasir.ini` again. With dedup off, F8 only says it needs dedup.
+`lerad.ini` again. With dedup off, F8 only says it needs repeated frames
+dropped, and where the window has that.
 
 While frame generation is off, mpv gets every frame anyway, repeats too
-(`[framegen] all_frames_when_off = 1`): the add-on asks Glasir for them
+(`[framegen] all_frames_when_off = 1`): the add-on asks Lerad for them
 through the link, which keeps telling new frames from repeats, so F8 back on
-returns to new frames only at once (`logs\glasir.log` notes each switch).
+returns to new frames only at once (`logs\lerad.log` notes each switch).
 `all_frames_when_off = 0` keeps new frames only while frame generation is off
 as well (DLSS 5 then runs once per game frame instead of on every captured
 one). Measured at 30 fps with VRR, mpv's present to the screen: 6.77 ms with
@@ -57,23 +58,80 @@ setting (the GPU keeps its clocks up at 60 frames a second); with NVIDIA's
 made every frame cost the GPU more at 60 fps (below), so the default is the
 better choice.
 
-Settings are in `ReShade.ini`, section `[GLASIR_FRAMEGEN]`:
+The repeats are asked for in one more case: while the in-game menu (Tab) is
+open - also while an area is drawn or dragged with the menu faded - and
+fewer than about 60 frames a second are shown (a still picture, or 5 to 20
+new frames a second: a console's home screen, a game's menu). The menu is
+drawn when a frame is presented, and at that rate short clicks went unseen
+and a drag came in jerks. mpv then presents every captured frame and the menu
+is drawn on each. Those presents are not frames of the game: the add-on
+leaves them out of everything (`menu_repeat` in `framegen_addon.cpp`) - no
+frame in between is made from one, and none counts as a real, generated or
+late frame; `ReShade.log` has a line of its own for them ("the menu was open
+on a slow picture: 40.0 repeats of it a second shown as well ..."). Which
+present carries a new frame is told from the link's arrival times and the
+time of mpv's present. Measured with a 20 fps picture and x2 (a 1280x720
+window, 120 Hz): 40 presents a second with the menu closed, 80 with it open
+(the menu drawn 60 times a second on mpv's presents alone); real frames 20.0
+either way, frames in between 20.0 closed and 19.6-19.8 open (one or two in
+five seconds lost to "queue full"), the hold's timing the same (25.01 ms).
+A picture shown at 55 a second or more gets no repeats.
+
+Settings are in `ReShade.ini`, section `[LERAD_FRAMEGEN]`:
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `Enabled` | 1 | Frame generation on at start (Glasir writes it from glasir.ini). |
+| `Enabled` | 1 | Frame generation on at start (Lerad writes it from lerad.ini). |
 | `ToggleKey` | 119 | Virtual key code of the toggle (119 or 0x77 = F8). |
 | `CaptureKey` | 120 | Saves the frames around this moment (120 = F9, see Captures). |
-| `DedupWhenOff` | 0 | 1 = new frames only while frame generation is off too (glasir.ini `all_frames_when_off = 0`). |
-| `MaxOutputHz` | 0 | Frames are only added while the result stays at or under this; 0 = the display's refresh rate (glasir.ini `max_output_hz`). A limit below the screen's rate is exact; the screen's own rate has 5 % of tolerance. |
-| `Multiplier` | 2 | Frames shown per source frame, at most: 2, 3 or 4 (glasir.ini `multiplier`). The most that fits is used. |
+| `DedupWhenOff` | 0 | 1 = new frames only while frame generation is off too (lerad.ini `all_frames_when_off = 0`). |
+| `MaxOutputHz` | 0 | Frames are only added while the result stays at or under this; 0 = the display's refresh rate (lerad.ini `max_output_hz`). A limit below the screen's rate is exact; the screen's own rate has 5 % of tolerance. |
+| `Multiplier` | 2 | Frames shown per source frame, at most: 2, 3 or 4 (lerad.ini `multiplier`). The most that fits is used. |
 | `ResetMs` | 100 | A longer gap between frames starts the timing over. |
-| `RequireDedupLauncher` | 1 | Only run with the link from Glasir's dedup. |
-| `Method` | motion | `motion` = motion-compensated, `blend` = 50/50 mix (glasir.ini `method`; the menu switches it). |
-| `Quality` | high | `high`, or `fast`: fewer candidates per pixel, about half the drawing cost (glasir.ini). |
-| `DebugMarker` | 0 | Magenta square in the top-left corner of generated frames. |
+| `RequireDedupLauncher` | 1 | Only run with the link from Lerad's dedup. |
+| `Method` | motion | `motion` = motion-compensated, `blend` = 50/50 mix (lerad.ini `method`; the menu switches it). |
+| `Quality` | high | `high`, or `fast`: fewer candidates per pixel, about half the drawing cost (lerad.ini). |
+| `Backend` | own | What makes the frames in between: `own`, or `dlss` (NVIDIA DLSS Frame Generation, where the GPU has it and its model is in the engine folder; lerad.ini `backend`). The app's name, which this was called before, is read as `own`. |
+| `Keep` | (empty) | Areas the frames in between leave alone (lerad.ini `keep`; here with `/` and `\|` for its `,` and `;`): `r:2/80/20/15\|e:85/5/12/20`. With `/hud` after its numbers an area only says where to look for a HUD (below). |
+| `Hud` | 0 | 1 = find the HUD everywhere: the frames in between show the nearer real frame wherever a HUD is found, with no area drawn (lerad.ini `hud`; below). |
+| `PictureOnly` | 1 | A switch (below). With black bars around the picture (a 16:9 game on a 21:9 screen), frames are generated from the picture alone; mpv says where it is. Better scenery at the picture's edges and less GPU time, but a HUD near those edges loses the bars' protection (docs/FRAMEGEN-LEARNINGS.md, 4.6): `StillHud` is for that, keep the two together. Does nothing without bars. |
+| `EdgeRules` | 1 | A switch. The strip along the frame's edges that only one frame shows in a camera turn is drawn along the turn's motion (same section). |
+| `StillHud` | 1 | A switch. Icons and digits drawn over fast-moving scenery are held where they are: the cells that hold detail which stands still while they move get no motion (docs/FRAMEGEN-LEARNINGS.md, 4.7). Gives a HUD near the picture's edges back what `PictureOnly` takes from it, and acts on a frame without bars too. The scenery right beside such a HUD (a cell, 16 px) stands still with it. |
+| `HistorySearch` | 0 | A switch, and a test: 1 = the motion search also starts from what each block did over the pair before (docs/FRAMEGEN-LEARNINGS.md, 4.5). Better offline on some captures, little either way on others. |
+| `HudClean` | 1 | A switch. With the HUD mask on (`Hud=1`, or an area with `/hud`) and the app's own generator: the frame in between is drawn from the two real frames without the HUD the mask holds, so no faint copy of an icon is carried along with the scenery (docs/FRAMEGEN-LEARNINGS.md, 14). About 0.2 ms more per frame in between at 4K. Does nothing while the HUD is not looked for. |
+| `StepDown` | 1 | A switch. Where x4 or x3 fits the screen but cannot be held there, one fewer is shown for every game frame for a while, so that each frame stays the same time ("A multiplier that cannot be held", below). 0 = always the most that fits the screen, as before 2026-11-18. |
+| `DebugMarker` | 0 | Magenta square in the top-left corner of generated frames (the picture's corner with `PictureOnly`). |
 | `LogStats` | 1 | A line in `ReShade.log` every 5 s (see below). |
-| `MpvPipe` | glasir | mpv IPC pipe for the OSD message. |
+| `MpvPipe` | lerad | mpv IPC pipe for the OSD message. |
+
+The six switches are not in `ReShade.ini` unless one differs from its
+default: the add-on writes the other keys there at its first start, but a
+switch only when the panel (below) is used to choose against the default,
+and it takes out one that says what the default says. So a later version
+can change a default for everyone who did not choose otherwise (the first
+three were tests, off, until 11-16: docs/FRAMEGEN-LEARNINGS.md, 4.8).
+To set one by hand, add the line (`StillHud=0`). `ReShade.log` has what is
+in use at start: `switches: PictureOnly=1 EdgeRules=1 StillHud=1
+HistorySearch=0 HudClean=1 StepDown=1`.
+
+The six switches, `DebugMarker` and `LogStats` can also be changed
+while playing: ReShade's own overlay (Home), page Add-ons, under "Lerad
+Frame Generation". The panel says what the generator is working on (the
+whole frame, or the picture and where it is), each checkbox works at once
+and is remembered in `ReShade.ini`. `PictureOnly` makes the generator anew a
+quarter of a second later. It is a page for trying things on the scene in
+front of you; `Enabled` and `Quality` are not on it, as Lerad writes those
+from lerad.ini at every start (its own menu, Tab, has them).
+
+The panel is drawn with ReShade's Dear ImGui, the menu with the add-on's own
+(src/overlay). `reshade_ui.cpp` keeps them apart: it calls ReShade's
+functions through the table ReShade hands out and is the only file that
+includes `reshade_overlay.hpp`. That header's inline functions carry Dear
+ImGui's own names (in one DLL with the real ones the linker would keep one
+of each for both) and it is written for the docking branch, which
+third_party/imgui is not; so they are left out and two type names are
+declared by hand. A ReShade without the overlay, or with another Dear ImGui
+version, gets no panel and the switches stay in the file.
 
 ## When it generates
 
@@ -84,7 +142,10 @@ A frame in between is made only when
   60 fps x2 on a 120 Hz screen). A rate at the edge does not switch back and
   forth: what is running gets 3 % more room, and going up again waits two
   seconds (`MultiplierGate` in `fg_pacing.h`),
-- fewer than two presents are still queued for the screen,
+- fewer than two presents are still queued for the screen ("queue full":
+  the game frame is then shown alone). When that keeps happening at x3 or
+  x4, one fewer is shown for every game frame ("A multiplier that cannot be
+  held", below),
 - the source is not paused (a still picture sends only keepalive repeats),
 - mpv keeps up. New frames dropped upstream right after a generated frame
   (with mpv at its usual pace) pause generation for 5 s, then 10, 20 ... up to
@@ -92,7 +153,8 @@ A frame in between is made only when
   drop reset that. Drops of mpv's own - across a stall far longer than the
   add-on's wait (DLSS 5 starting, shaders recompiling), or while not
   generating - only make it wait until mpv has gone a second without dropping.
-  It also waits 2 s after mpv starts.
+  It also waits 2 s after mpv starts. At x3 and x4 such drops first take one
+  frame off every game frame (below); the pause is what is left at x2.
 
 The source rate comes from the link (the card's arrival times), not from
 mpv's frames: while generating, mpv runs at the add-on's pace, so only the
@@ -102,10 +164,15 @@ card's clock can tell that the display is too slow for twice the source rate.
 
 The frames are spaced by time (the hold, below): each is let go one step
 (the source interval divided by the multiplier) after the one before. What
-that looks like depends on the screen. Glasir.exe tells the add-on what it
-found (`GLASIR_DISPLAY_VRR` = on, off or unknown, `GLASIR_DISPLAY_HZ`); the
-add-on judges the result (`judge_cadence` in `fg_pacing.h`) and the menu
-says so.
+that looks like depends on the screen - the one mpv's window is on, which
+the add-on looks up every second (`fg_vblank.h`): the window can be moved,
+and screens are plugged in or switched off while it runs. Its refresh rate
+is read from Windows then. Its VRR state is what Lerad.exe found for every
+screen at start (`LERAD_SCREENS`, `fg_screen.h`: on, off or unknown per
+screen); a screen that was not there then, or another monitor under the
+same output name, is "unknown". The add-on judges the result
+(`judge_cadence` in `fg_pacing.h`) and the menu says so. The log says where
+the window is, and each change ("the window is now on screen 2 (...)").
 
 | Screen | Example | What happens | The menu |
 | --- | --- | --- | --- |
@@ -114,17 +181,29 @@ says so.
 | Fixed refresh, a multiple of the output | 30 -> 60 on 120 or 240 Hz | Frames land on whole refreshes. A frame let go a whole number of refreshes after the one before was done arrives just after its refresh and waits for the next: measured 5 and 3 refreshes instead of 4 and 4 (below) | "VRR is not engaging" if VRR was expected |
 | Fixed refresh, not a multiple | 60 -> 120 on 144 or 165 Hz | Uneven whatever is done (1, 1, 1, 1, 2 refreshes) | "Uneven on this screen ... Set the screen to 120 Hz, or turn VRR on" |
 
-Whether VRR really engages cannot be asked of Windows. The add-on watches
-the swap chain's refresh counter (`GetFrameStatistics`) once a second: when
+Whether VRR really engages cannot be asked of Windows. The add-on counts
+the refreshes of the screen the window is on - a thread waits for each
+vertical blank of that screen's own video source
+(`D3DKMTWaitForVerticalBlankEvent`, the call under DXGI's `WaitForVBlank`;
+`fg_vblank.h`) - and reads the count once a second (`RefreshWatch` in
+`fg_pacing.h`). The count and what was made of it start over when the
+window is on another screen or the screen's mode changes. (Until 2026-11-18
+it was the swap chain's `SyncRefreshCount`, which follows Windows'
+compositor for a composed window: the main screen's 240 on the 120 Hz
+screen beside it.) When
 the screen is seen refreshing at its full rate for three seconds while
 clearly fewer frames are shown (45 or more a second, under 90 % of the
 rate), it is refreshing at a fixed rate - VRR is off for windows in the
 driver, the window is not focused, or Windows composes it. The log's 5 s
 line carries the reading ("seen refreshing at 240.0"), the log warns once
 when VRR was said to be on, and the menu tells the user. That a screen with
-VRR engaged reads lower (the refreshes following the frames) is how the
-counter is documented to behave, not something measured here: no focused
-VRR window was available for it (2026-11-12).
+VRR engaged reads lower (the refreshes following the frames) has one
+measurement behind it (2026-11-18, the count taken from outside mpv with
+a small probe kept outside the repo): a 120.000 Hz screen read 119.86-119.90 while
+Lerad showed 59.94 x2 on it with VRR on, and 120.00 once mpv was closed.
+That is at the top of the range; well below it (30 -> 60 on 120 Hz, where
+the warning matters) it is still to be seen, as are two screens at once and
+a window moved between them.
 
 Measured 2026-11-12 on an RTX 5090, a 240 Hz screen, a 1280x720 window that
 did not have the focus ("Composed: Flip" in PresentMon, so a fixed 240 Hz
@@ -133,14 +212,81 @@ whatever the screen can do), a synthetic 30 fps source, DLSS 5 off:
 | Setting | Let go (CPU, from the trace) | On screen (PresentMon) |
 | --- | --- | --- |
 | 30 fps x2 | real frame 16.68 ms after the frame in between was done, sd 0.00 | 60.0 fps; 5 and 3 refreshes alternating (20.8 / 12.5 ms), sd 4.4 ms |
-| 30 fps x2, `GLASIR_FRAMEGEN_LEAD_MS=5` | 11.68 ms after | 60.0 fps; 78 % of frames 4 refreshes (16.7 ms), sd 2.7 ms |
+| 30 fps x2, `LERAD_FRAMEGEN_LEAD_MS=5` | 11.68 ms after | 60.0 fps; 78 % of frames 4 refreshes (16.7 ms), sd 2.7 ms |
 | 30 fps x3 | steps 11.12 and 11.11 ms, sd 0.01-0.05 | 90 fps; 3, 2, 3 refreshes (12.5 / 8.3 / 12.5 ms): 90 does not divide 240 |
 | 30 fps x4 | steps 8.34, 8.32, 8.32 ms, sd 0.13 | 119.3 fps; 71 % of frames 2 refreshes (8.3 ms), sd 2.7 ms; other runs 107-109 fps with 19-24 "queue full" in 5 s |
 | 60 fps x2 | 8.35 ms after, sd 0.01 | 98-101 fps, 94-107 "queue full" in 5 s (the composed window, as in FRAMEGEN-LEARNINGS.md) |
 
-`GLASIR_FRAMEGEN_LEAD_MS=<ms>` lets every held frame go that much earlier.
+`LERAD_FRAMEGEN_LEAD_MS=<ms>` lets every held frame go that much earlier.
 It is a test switch for fixed-refresh screens, where it puts frames back on
 their refresh (the second row); with VRR it would make them uneven.
+
+## A multiplier that cannot be held
+
+What fits the screen by its numbers is not always what the screen takes.
+With x3 and x4 all of a game frame's frames must be out before the next one
+comes. A window Windows composes shows one frame a refresh, so 30 fps x4 on
+120 Hz leaves it no spare one: presents are still queued when the next game
+frame comes, and that one is shown alone ("queue full"). Measured
+(2026-11-18, a 1280x720 window without the focus on a 120 Hz screen, a 30
+fps source): every other game frame, so four frames 8 ms apart and then one
+that stays 33 ms, 75 frames a second instead of 120 - which looks worse than
+90 even ones. A GPU that is late with the first added frame (DLSS 5 taking
+most of the interval) ends the same way.
+
+`StepDown=1` (the default; `StepDown` in `fg_pacing.h` is the rule, with its
+numbers and tests) takes one frame off every game frame instead:
+
+- **Down.** Of the game frames that would get their frames at x3 or x4, 4
+  shown alone within 2 s, the first and the last of them at least half a
+  second apart: one fewer from the next game frame on (x4 to x3, x3 to x2).
+  A hiccup (a few in a row, then none) and a frame left out now and then (a
+  screen at the top of its VRR range does that) are below it. mpv dropping
+  the game's frames while generating at x3 or x4 does the same at once,
+  instead of the pause for all frame generation.
+- **Again.** The one above is tried after 20 s. For 3 s after a try, 2 game
+  frames shown alone are enough to go back down (a tenth of a second of
+  uneven frames, measured), and the next try waits twice as long: 40, 80,
+  160, then 300 s each time. A try that held a minute was not a failed one;
+  the waits start over.
+- **At once.** It is tried as soon as something changes that may have been
+  the cause, but not before the lower one has been in use 5 s: the window
+  (its place, size or style: the window mode), the screen or its mode, the
+  picture's size or place in the back buffer, the source's rate (a steady
+  one a tenth off; not a rate that moves by itself), ReShade's effects
+  starting or stopping (DLSS 5 switched). A setting of frame generation
+  changed in the menu or with F8 (on or off, "Up to", "Frames by", quality,
+  method, "find the HUD everywhere") forgets everything: the multiplier is
+  chosen as at start, and the waits start at 20 s.
+- **x2** is never stepped down from. Frames left out there are said in the
+  menu as before ("104 of 120 fps"), and mpv not keeping up is what the
+  pause is for.
+- **Why**, for the menu and the log: the GPU when mpv dropped frames, or when
+  most of the game frames that did get their frames had them let go early
+  for the next one (the hold's "let go early" and "already due when done":
+  the first added frame was done too late for the others to keep their
+  step); else the screen.
+
+The menu says it as a warning: "x3, not x4 / The screen takes frames late at
+x4, so every game frame gets two added frames instead of three. Windows may
+be composing the window." with "Switch to full screen", or "The GPU cannot
+keep up at x4 ..." with "Use Fast quality". `FramegenStatus` carries it
+(`Reason::SteppedDown`, `step_from`, `step_cause`, `seconds_left`), and the
+panel on ReShade's Add-ons page has the switch and a line with the seconds
+until the next try. The multiplier still goes through `MultiplierGate`: on
+a screen known to refresh at a fixed rate, x4 that cannot be held becomes
+x2 where x3 would not fall on whole refreshes.
+
+It works by counting game frames and what they got, so it is the same for
+either generator (seen with both). Whether a window holds 30 fps x4 on 120
+Hz differed from run to run on the PC it was measured on (it started out
+losing every other game frame in 7 runs of 12; in the others it lost one
+game frame's frames every 3 s, which is under the rule's limit, and one of
+those went over after 27 s): the source's 30 and the screen's 120 are not
+the same clock, and where the presents fall between two refreshes moves.
+Not seen: a window flipped straight to the screen, VRR engaged, a console
+in motion on the card, and the GPU as the cause (the rule's tests and the
+menu's demo state only).
 
 ## Logs
 
@@ -156,6 +302,20 @@ frame in between was done (done 9.41 ms avg after the add-on drew it), let go 0.
 avg, 0.029 max; of 151: 151 timed (0 of them let go early for the next frame, 0 already due
 when done), 0 without the done signal, 0 with a later frame (queue full, resize); queued in
 10.00 ms max
+```
+
+While a multiplier is stepped down (above), the line begins `30.0 real +
+60.0 generated fps (x3 of up to x4, stepped down from x4 for the screen, x4
+tried again in 12 s)`, and each change has a line of its own:
+
+```
+x4 cannot be held (the screen takes frames late: 9 game frames in the last 2 s went
+without their added frames, presents were still queued); x3 for the next 20 s
+x4 is tried again (its time came)
+x4 cannot be held (the screen takes frames late: 2 game frames in the last 2 s ...); x3
+for the next 40 s
+x4 is tried again (the window changed)
+frame generation switched: no longer stepped down to x3, the multiplier is chosen anew
 ```
 
 After "interval", a source whose rate moves reads `(source, 40-57 fps,
@@ -180,11 +340,11 @@ resized). "Queued in" is how long the copy and present of the real frame
 took on mpv's thread (Windows makes the present wait until the frame in
 between is drawn). "None in this window" means nothing was generated. Without
 the hold - no Direct3D 12, which the log says at the first generated frame,
-or `GLASIR_FRAMEGEN_PACING=present` for comparisons - the add-on sleeps on mpv's
+or `LERAD_FRAMEGEN_PACING=present` for comparisons - the add-on sleeps on mpv's
 thread until half an interval after mpv's present and the line ends
 `real frame out late by ...` instead.
 
-In the trace (`GLASIR_FRAMEGEN_TRACE`), `real_ms` is when the frame was let
+In the trace (`LERAD_FRAMEGEN_TRACE`), `real_ms` is when the frame was let
 go on the CPU: the release of the hold, or (without it) the end of the sleep
 before its present; -1 when it went out with a later frame. `frame` and `of`
 say which of the source frame's frames the line is (2 of 2 is the real frame
@@ -198,7 +358,7 @@ is how many refreshes a frame stayed up; it matched PresentMon's
 `msBetweenDisplayChange` in the runs above. PresentMon itself runs without
 administrator rights for members of the "Performance Log Users" group.
 
-`logs\glasir.log`:
+`logs\lerad.log`:
 
 - `dedup: 28.8 new frames/s of 57.5 captured (changes: repeats up to 0, new
   frames from 2556, new from 4; repeats' noise up to 5 a sample, 1.0 a block;
@@ -231,7 +391,7 @@ administrator rights for members of the "Performance Log Users" group.
   are due - and moves the second fence on from the CPU (a Direct3D 12 fence on
   the same GPU, shared with D3D11: D3D11 cannot signal one from the CPU). With
   VRR that puts B on screen half an interval after the frame in between.
-  Without the hold (no Direct3D 12, or `GLASIR_FRAMEGEN_PACING=present`) it
+  Without the hold (no Direct3D 12, or `LERAD_FRAMEGEN_PACING=present`) it
   sleeps until half the source interval after B arrived and presents B then.
   That present bypasses ReShade, so the DLSS 5 add-ons still see exactly one
   frame per real frame.
@@ -277,7 +437,12 @@ The frame in between (`fg_interp.h`, shaders in `flow.hlsl`):
 3. The motion at the frame in between, per 16x16 pixels: of the motions found
    nearby in both directions (and those found where each says the content came
    from and went to), the one under which A, shifted back half way, and B,
-   shifted forward half way, agree best.
+   shifted forward half way, agree best. (With `StillHud`: a cell that moves
+   but holds edges which are the same in A and B where they are - not along
+   the motion, and not the same again where the motion takes them - holds a
+   HUD over the scenery. It and the cells right around it get no motion, here
+   and as A's and B's blocks, so step 4 treats the HUD as it treats anything
+   that stands still.)
 4. Each pixel tries the motions of the 3x3 cells around it and none, judged
    on a small cross of five pixels by how well A and B agree there; a motion
    several cells share is sampled once and counts as many votes. Where only
@@ -429,6 +594,55 @@ The frame in between (`fg_interp.h`, shaders in `flow.hlsl`):
    `fg_eval --adjacent` output, head regions in `eval\head_rois.json`), at about +0.07 ms in a pan and +0.15-0.3 ms with a
    character.
 
+The HUD, found by itself (`fg_hud.h`, shaders in `hud.hlsl`; off unless
+`Hud=1` or an area asks for it; docs/FRAMEGEN-LEARNINGS.md, 14):
+
+- A HUD does not move, and a generator moves what it sees: icons and digits
+  over moving scenery come out faded or doubled. An area left alone (`Keep`)
+  cures that with the nearer real frame, for everything in the area - the
+  scenery seen beside and through the HUD too. The mask is that cure for the
+  HUD's own pixels only, and needs no area.
+- Once per pair of real frames, two counters per pixel go one step on: a
+  pixel that stayed as it was (nothing changing within 2 px) while the
+  scenery's motion says it should have changed, and an edge that stayed the
+  same edge across a motion that would have moved it, count up; a pixel that
+  changes lets go at once. The motion is the block motion of step 2 from a to
+  b - the pixel's own cell's, and the background's around it (per block of
+  8x8 cells the median of the cells that move). On from two pairs; the mask
+  is that, grown by 2 px.
+- After the frame in between is made - by the app's own generator or by DLSS
+  Frame Generation - one pass draws the nearer real frame where the mask is
+  set: over the whole picture with `Hud=1`, else inside the areas marked
+  `/hud`. Areas without the mark are copied whole, as before.
+- A generator carries what it sees along the scenery's motion, HUD pixels
+  too: a faint copy of an icon half a step from the icon. With `HudClean`
+  (the app's own generator) the mask goes its pair on as soon as the draw has
+  found the motion (`fg::Interpolator::after_motion`), and the frame is drawn
+  from the two real frames without the HUD the mask holds
+  (`fg::HudMask::clean_frames`): under each HUD pixel of one frame, what the
+  scenery shows there in the other frame a step along the motion, or - where
+  that is HUD as well, or nothing moves - the earlier frame's scenery from
+  the nearest place the HUD ends. The pass above then puts the HUD back.
+  Copies of HUD parts the mask does not hold stay.
+- DLSS Frame Generation hands out no motion: the pyramids and the search one
+  way (steps 1 and 2) are run for the mask alone
+  (`fg::Interpolator::find_flow`). A picture too small to search gets a rule
+  without motion (detail that does not change while the frame as a whole
+  does, over four pairs). With `Method=blend` nothing is looked for: a mix
+  moves nothing.
+- The counters start over when the picture's size or place changes, on a
+  switch between SDR and HDR, and after a second without a pair (frame
+  generation off or paused, a still picture). A cut is not told to them: the
+  pixels that change are let go by the rule itself.
+- Thresholds are steps of 8-bit SDR luma; for HDR10 (PQ) a step counts half
+  as much of the code range. That is derived, not measured on HDR captures.
+  Not run on an scRGB back buffer.
+- Cost on an RTX 5090: 0.24-0.32 ms once per real frame at 5120x1440 and
+  3840x2160 (about twice that with the search for DLSS Frame Generation), and
+  0.02-0.03 ms per frame in between. `ReShade.log` says what it works on
+  ("HUD mask: on, everywhere, 3840x2160, SDR levels, by the generator's
+  motion") and, with the 5 s line, how much the mask holds and what it costs.
+
 Frames that do not just move:
 
 - Fades and flashes: every comparison is made after correcting for how much
@@ -472,7 +686,7 @@ generated with the real frame about 2.5 ms late, later runs dropped a few
 source frames, and the add-on then backed off and generated almost nothing.
 Screenshots with `DebugMarker=1` showed generated frames on screen, sharp,
 without the blend's double image. All of this used a synthetic source through
-`Glasir --input-raw`; the capture card has not been run with this
+`Lerad --input-raw`; the capture card has not been run with this
 folder yet.
 
 On screen with VRR (`vrr-test.ps1 -Steady`, PresentMon, 2026-10-30), how long
@@ -555,11 +769,14 @@ for SDR - also when mpv draws SDR into a 10-bit back buffer, as it does on a
 10-bit desktop, so 16-bit always means PQ to the viewer and the eval tools) and
 the frames the add-on drew between them (`between_f01_f02.png`, ...). Press it
 while something looks wrong (frame generation must be on); there is one short
-hitch while it saves, and mpv's OSD says when the files are written (about
-130 MB per capture).
+hitch while it saves, and a toast says when the files are written (100-150 MB
+per capture). The bug report made with them (`Bug reports\`, a few MB) holds
+JPEG pictures of these frames, HDR tone-mapped to SDR, not the frames: for
+measuring, ask for the folder in `Captures\` that its system.txt names.
 
-`python src\framegen\eval\view_captures.py [FOLDER]` (needs Python with Pillow,
-and ffmpeg on PATH) shows them: pick a capture on the left, then
+`tools\view_captures.cmd [FOLDER]` (double-click it for the captures in
+`out\Lerad\Captures`; it starts `src\framegen\eval\view_captures.py` and
+needs Python with Pillow, and ffmpeg on PATH) shows them: pick a capture on the left, then
 Left/Right steps through f01, the generated frame, f02, ... tone-mapped like
 `eval\compare.sh`. Zoom (mouse wheel, `1` = 100 %) and pan stay put while
 stepping, so one spot can be compared frame to frame; Space plays the capture
@@ -568,7 +785,8 @@ the generated frames for comparison; Up/Down changes capture; the status bar
 gives the frame pixel under the cursor. Delete (or the Delete button) moves the
 capture on show to the Recycle Bin and opens the next one, so a run of
 captures can be pruned key by key; Shift+Delete deletes it for good, after
-asking.
+asking. An unpacked bug report can be given as the folder: its pictures are
+shown the same way.
 
 `eval\fg_eval.exe Captures` scores such folders like its own clips:
 it makes the frame between f01 and f03 and compares it with f02 (and f03-f05
@@ -604,26 +822,26 @@ in the first eight, before step 5: 1.18 mean, 1.55 worst. All 64 pairs now
 
 ## Build and test
 
-- `build.cmd` (repo root) builds the add-on with the rest of Glasir and
-  installs it into `out\Glasir\engine`; the shaders are compiled with fxc
-  into headers (`shaders.cmake` lists them). `Glasir.exe --setup` puts
+- `build.cmd` (repo root) builds the add-on with the rest of Lerad and
+  installs it into `out\Lerad\engine`; the shaders are compiled with fxc
+  into headers (`shaders.cmake` lists them). `Lerad.exe --setup` puts
   ReShade (add-on build, from reshade.me) next to mpv.exe.
-- Settings: `glasir.ini` `[framegen]` (on/off, quality, method, multiplier,
-  max_output_hz, every frame while off). Glasir writes them into
-  `engine\ReShade.ini`, section `[GLASIR_FRAMEGEN]`, before mpv starts; the
+- Settings: `lerad.ini` `[framegen]` (on/off, quality, method, multiplier,
+  max_output_hz, every frame while off). Lerad writes them into
+  `engine\ReShade.ini`, section `[LERAD_FRAMEGEN]`, before mpv starts; the
   other keys there (DebugMarker, ResetMs, ToggleKey, CaptureKey, ...) can be
   edited by hand. The add-on logs to `engine\ReShade.log`.
 - The arithmetic of the pacing and of the menu's numbers is in `fg_pacing.h`
   (no Direct3D), tested by `tests\test_fg_pacing.cpp` with the menu's wording
   (`src\overlay\framegen_text.h`).
 - Without a card: `python tools\smoke_raw.py --seconds 12` runs the whole chain
-  (ffmpeg test pattern -> `Glasir.exe --input-raw -` with dedup -> mpv ->
+  (ffmpeg test pattern -> `Lerad.exe --input-raw -` with dedup -> mpv ->
   ReShade -> the add-on); its 5 s stats lines are in ReShade.log. With
-  `GLASIR_FRAMEGEN_TRACE=<file.csv>` the add-on writes one line per real
+  `LERAD_FRAMEGEN_TRACE=<file.csv>` the add-on writes one line per real
   frame (when it arrived, mpv's present, the frame in between done on the
   GPU and the real frame let go, in ms after the add-on ran).
-  `GLASIR_FRAMEGEN_CAPTURE_AFTER=<s>` takes a capture, and
-  `GLASIR_FRAMEGEN_TOGGLE_AFTER=<s>` presses F8 once, that many seconds in.
+  `LERAD_FRAMEGEN_CAPTURE_AFTER=<s>` takes a capture, and
+  `LERAD_FRAMEGEN_TOGGLE_AFTER=<s>` presses F8 once, that many seconds in.
 - `eval\fg_eval.exe` (built as `build\vs\src\framegen\Release\fg_eval.exe`)
   scores repeat, blend and motion with the same `fg_interp.h` the add-on runs:
   `fg_eval.exe [--clip NAME] [--out DIR] [--profile] [--stats] [--set NAME VALUE] SEQ_DIR`
@@ -642,11 +860,29 @@ in the first eight, before step 5: 1.18 mean, 1.55 worst. All 64 pairs now
   frame alone.) A change to the shaders or `fg_interp.h` should keep or
   raise these scores; the port to Glasir gave the prototype's numbers
   exactly (synthetic mean 42.93 dB).
+- The HUD mask is scored along longer clips, as it needs a few pairs of
+  history: `fg_eval.exe --hud BOXES.json [--methods motion,dlss] [--hud-rules
+  motion,plain] [--hud-set NAME VALUE] [--hud-save 8,12 --out DIR] SEQ_DIR`,
+  on clips of 33 frames in a row (pair k is frames 2k-1 and 2k+1, the true
+  frame 2k) with the HUD's boxes marked by hand in BOXES.json (`{"clip":
+  [{"name": "minimap", "box": [left, top, width, height]}, ...]}`). Every
+  pair is run in order with `fg_hud.h` as the add-on runs it, and each frame
+  in between is scored as it is, with the boxes copied whole, with the mask
+  inside the boxes and with the mask everywhere: the error on the HUD's own
+  pixels, on the rest of the boxes and outside them, the whole frame's PSNR,
+  how much of the HUD the mask holds pair by pair, and the GPU time of the
+  detector and of the mask's pass. `--resize W H` scales the frames first
+  (the times at another size); `--as-pq NITS` gives them to the generator and
+  the mask as HDR10 (PQ). A change to `hud.hlsl` or `fg_hud.h` should be
+  judged on all the clips, and `fg_eval` without `--hud` must score what it
+  did before.
 - `eval\compare.sh OUT.png W:H:X:Y SCALE A.png B.png ...` puts tone-mapped
   crops of HDR frames side by side; `eval\blockiness.py --diff A.png B.png`
   lists where two versions of a frame differ most; `eval\view_captures.py`
   shows captures (Tk, Pillow, ffmpeg on PATH); `eval\needle_score.py` and
-  `eval\head_score.py` score thin hair and heads on captures (`FG_CAP`).
+  `eval\head_score.py` score thin hair and heads on captures (`FG_CAP`);
+  `eval\hud_score.py` scores what stands still on the screen while the scene
+  moves (a HUD), on `fg_eval --adjacent` frames.
 - `eval\raw_pace.exe` sends raw frames at an even 1/60 s like a card (ffmpeg
   `-re` jumps 4-43 ms between frames, and with VRR the screen shows that).
 - Not ported yet: the prototype's VRR measurement under PresentMon
@@ -658,11 +894,24 @@ in the first eight, before step 5: 1.18 mean, 1.55 worst. All 64 pairs now
   errors where one frame hides what the other shows.
 - What no motion search can follow (lightning, sparks, a very fast attack) is
   drawn as a soft smear, not as it would look half way.
+- The HUD mask (`Hud=1`, areas with `/hud`) holds the HUD's own pixels: the
+  faint copy the generator draws beside a HUD part goes only where the mask
+  holds that part (`HudClean`; text that does not stand out from what is
+  behind it is not held), a HUD part that moves or
+  fades is let go while it does, and something that stands still on screen
+  over moving scenery (a cockpit frame) is taken for a HUD. Scored on SDR
+  clips of three games; its HDR thresholds are derived, not measured.
 - x2 by default; x3 and x4 are an option (`Multiplier`), checked for timing
   and for where the frames in between sit (a moving bar at 0.24 / 0.50 / 0.76
   and 0.34 / 0.66 of its step, from F9 captures of a synthetic source), not
   for picture quality on game captures: `fg_eval` scores only the middle
   frame, and thirds and quarters draw more from one of the two frames.
+- A multiplier that fills the screen's rate (30 fps x4 on 120 Hz) has no
+  spare refresh. In a window Windows composes it is stepped down to x3 when
+  game frames keep going without their frames ("A multiplier that cannot be
+  held"); one game frame's frames left out every few seconds is under that
+  rule's limit and stays as it is. The rule's numbers come from one PC, one
+  screen and a synthetic 30 fps source.
 - At 60 fps full screen the GPU is near its limit next to the DLSS 5 pass (see
   Measured): earlier runs backed off; on 2026-10-30 synthetic runs held 60 + 60
   with no drops.

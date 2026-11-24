@@ -19,7 +19,7 @@
 
 #include "display.h"
 
-namespace glasir {
+namespace app {
 
 // What a monitor's EDID says about variable refresh.
 struct EdidVrr {
@@ -61,8 +61,44 @@ std::vector<unsigned char> read_edid(const std::wstring &monitor_device_path);
 // it does not know the screen.
 NvidiaVrr read_nvidia_vrr(const std::wstring &device);
 
+// What NVIDIA's driver has set for one program (the NVIDIA Control Panel's
+// "Program Settings"). A program's profile can say "full screen only" while
+// the global setting says "windowed and full screen": G-SYNC then never
+// engages in mpv's window, which is how the app shows the picture, and the
+// screen keeps its fixed rate. The control panel does not show these two
+// settings per program.
+struct NvidiaAppVrr {
+    bool read = false;         // the driver answered
+    bool has_profile = false;  // a profile names this program
+    bool own_path = false;     // ... by this very path (not every mpv.exe)
+    std::wstring profile;      // its name
+    // In effect for the program, from its profile or what it inherits:
+    // 0 off, 1 full screen only, 2 windowed and full screen; -1: not read.
+    int mode = -1;       // "Enable G-SYNC" (VRR_MODE)
+    int requested = -1;  // the state asked for (VRRREQUESTSTATE)
+    bool mode_own = false, requested_own = false;  // set in the profile itself
+    // Windowed G-SYNC is allowed for the program (both are 2).
+    bool windowed() const { return mode == 2 && requested == 2; }
+};
+
+// exe: the program's full path (engine\mpv.exe).
+NvidiaAppVrr read_nvidia_app_vrr(const std::wstring &exe);
+
+// Sets both to "windowed and full screen" for this path only, in the
+// program's own profile (made if there is none). What was there before is
+// kept in backup_file (never overwritten: the first state is the one to go
+// back to). The program must be started again to see it.
+bool allow_nvidia_windowed_vrr(const std::wstring &exe, const std::wstring &backup_file, std::wstring &error);
+
+// Puts back what backup_file holds and deletes it; a profile the app made is
+// removed when nothing else was added to it.
+bool restore_nvidia_app_vrr(const std::wstring &exe, const std::wstring &backup_file, std::wstring &error);
+
+// One or two lines for --system and --gsync-profile.
+std::wstring nvidia_app_vrr_text(const NvidiaAppVrr &v);
+
 // All of it for one screen: reads the EDID, asks NVIDIA's driver when the
 // screen is on an NVIDIA GPU (d.gpu_vendor), and fills d.
 void read_vrr(DisplayInfo &d, const std::wstring &monitor_device_path, bool hdmi);
 
-}  // namespace glasir
+}  // namespace app

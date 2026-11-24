@@ -16,7 +16,7 @@
 
 using Microsoft::WRL::ComPtr;
 
-namespace glasir {
+namespace app {
 namespace {
 
 // Built-in devices all share this "container": it says nothing.
@@ -130,4 +130,4 @@ std::optional<AudioInput> find_card_audio(const std::vector<AudioInput> &inputs,
     return std::nullopt;
 }
 
-}  // namespace glasir
+}  // namespace app

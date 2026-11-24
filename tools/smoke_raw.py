@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: MIT
 """End-to-end check without a capture card.
 
-Pipes ffmpeg's test pattern into Glasir.exe --input-raw (the same path a card's
-frames take), asks mpv over Glasir's IPC pipe what it is playing, then closes
-it and prints Glasir's log. Opens a 1280x720 window for a few seconds.
+Pipes ffmpeg's test pattern into the exe's --input-raw (the same path a card's
+frames take), asks mpv over the app's IPC pipe what it is playing, then closes
+it and prints the app's log. Opens a 1280x720 window for a few seconds.
 
     python tools/smoke_raw.py                      # NV12 1280x720, 30 fps game in 60
     python tools/smoke_raw.py --format p010 --hdr
@@ -16,7 +16,8 @@ import subprocess
 import sys
 import time
 
-PIPE = r'\\.\pipe\glasir'
+from app_name import NAME, EXE, LOG, PIPE, APP_DIR
+
 FFMPEG_FORMAT = {'nv12': 'nv12', 'p010': 'p010le', 'yuy2': 'yuyv422', 'uyvy': 'uyvy422'}
 MPV_FORMAT = {'nv12': 'nv12', 'p010': 'p010', 'yuy2': 'yuyv422', 'uyvy': 'uyvy422'}
 
@@ -46,7 +47,7 @@ def request(pipe, command, request_id):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument('--app', default=os.path.join(os.path.dirname(__file__), '..', 'out', 'Glasir'))
+    p.add_argument('--app', default=APP_DIR)
     p.add_argument('--format', default='nv12', choices=sorted(FFMPEG_FORMAT))
     p.add_argument('--size', default='1280x720')
     p.add_argument('--fps', type=float, default=60, help='capture rate')
@@ -61,8 +62,8 @@ def main():
          '-i', f'testsrc2=size={a.size}:rate={a.game_fps:g}',
          '-vf', f'fps={a.fps:g},format={FFMPEG_FORMAT[a.format]}', '-f', 'rawvideo', '-'],
         stdout=subprocess.PIPE)
-    glasir = subprocess.Popen(
-        [os.path.join(a.app, 'Glasir.exe'), '--no-dialogs', '--input-raw', '-', '--raw-format', a.format,
+    process = subprocess.Popen(
+        [os.path.join(a.app, EXE), '--no-dialogs', '--input-raw', '-', '--raw-format', a.format,
          '--set', f'capture.width={width}', '--set', f'capture.height={height}', '--set', f'capture.fps={a.fps:g}',
          '--set', 'window.mode=windowed', '--set', f'video.mode={"hdr" if a.hdr else "sdr"}'],
         stdin=ffmpeg.stdout)
@@ -78,7 +79,7 @@ def main():
         time.sleep(max(a.seconds - 2, 1))
         n1, t1 = request(pipe, ['get_property', 'estimated-frame-number'], 2).get('data') or 0, time.time()
         fps = (n1 - n0) / (t1 - t0) if n1 > n0 else None
-        # The format as decoded; the colour tags after Glasir's format filter
+        # The format as decoded; the colour tags after the app's format filter
         # (mpv may convert packed formats like yuyv422 on the way out).
         decoded = request(pipe, ['get_property', 'video-params'], 6).get('data') or {}
         params = request(pipe, ['get_property', 'video-out-params'], 3).get('data') or {}
@@ -100,21 +101,21 @@ def main():
         ok = False
     finally:
         try:
-            glasir.wait(10)
+            process.wait(10)
         except subprocess.TimeoutExpired:
-            glasir.kill()
+            process.kill()
             ok = False
         ffmpeg.kill()
 
-    log = os.path.join(a.app, 'logs', 'glasir.log')
+    log = os.path.join(a.app, 'logs', LOG)
     if os.path.exists(log):
         with open(log, encoding='utf-8-sig', errors='replace') as f:
             for line in f:
                 if 'started mpv' not in line:
                     print('  ' + line.rstrip())
-    print(f'Glasir exit code {glasir.returncode}')
-    print('PASS' if ok and glasir.returncode == 0 else 'FAIL')
-    return 0 if ok and glasir.returncode == 0 else 1
+    print(f'{NAME} exit code {process.returncode}')
+    print('PASS' if ok and process.returncode == 0 else 'FAIL')
+    return 0 if ok and process.returncode == 0 else 1
 
 
 if __name__ == '__main__':

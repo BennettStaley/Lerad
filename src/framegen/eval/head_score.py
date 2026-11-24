@@ -7,14 +7,17 @@
 <clip>_motion_2.png = f03+f05 -> f04) against the real f02/f04, inside the head ROIs of head_rois.json.
 
 Usage: head_score.py OUTDIR [OUTDIR2 ...]   (several dirs -> one column each)
-Captures are read from Glasir's Captures folder (out/Glasir/Captures) (or FG_CAP); ROIs whose capture
+Captures are read from the built app's Captures folder (in out/) (or FG_CAP); ROIs whose capture
 was deleted are listed as missing and left out of the mean.
 """
 import sys, os, json, math
 import numpy as np
 from PIL import Image
 
-root = os.environ.get('FG_CAP') or os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', '..', 'out', 'Glasir', 'Captures')
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', '..', 'tools'))
+from app_name import APP_DIR  # the product's name, from the root CMakeLists.txt
+
+root = os.environ.get('FG_CAP') or os.path.join(APP_DIR, 'Captures')
 root = root.rstrip('/\\') + '/'
 rois = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'head_rois.json')))
 S = 240

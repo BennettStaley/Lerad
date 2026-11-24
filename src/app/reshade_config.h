@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: MIT
-// ReShade.ini, ReShadePreset.ini and dlss5-feed.cfg (next to mpv.exe): Glasir
-// writes what glasir.ini decides there before mpv starts, and leaves
+// ReShade.ini, ReShadePreset.ini and dlss5-feed.cfg (next to mpv.exe): the app
+// writes what the settings file decides there before mpv starts, and leaves
 // everything else to ReShade, the add-ons and the user.
 #pragma once
 #include <string>
 
 #include "settings.h"
 
-namespace glasir {
+namespace app {
 
 // False if ReShade (dxgi.dll) is not in the engine folder: no ReShade, so no
 // frame generation and no DLSS 5.
@@ -17,8 +17,8 @@ bool reshade_installed(const std::wstring &engine_dir);
 bool dlss5_installed(const std::wstring &engine_dir);
 
 // dlss5_loaded: the DLSS 5 add-ons work this time (installed, and the GPU
-// can or glasir.ini says try); dlss5_on: its effects start switched on. Loaded
+// can or the settings file says try); dlss5_on: its effects start switched on. Loaded
 // but off, the in-game menu can switch them on without a restart.
 void write_reshade_config(const std::wstring &engine_dir, const Settings &s, bool dlss5_loaded, bool dlss5_on);
 
-}  // namespace glasir
+}  // namespace app

@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: MIT
 """Checks every scaling mode end to end, without a capture card.
 
-Pipes ffmpeg's test pattern, smaller than mpv's window, into Glasir.exe
+Pipes ffmpeg's test pattern, smaller than mpv's window, into the exe
 --input-raw, switches the scaling modes the way the in-game menu does
-(script-message glasir-scaling), and checks over Glasir's IPC pipe what
-glasir_scaling.lua put in place: the shaders, the VSR filter, the mode. Prints
+(script-message app-scaling), and checks over the app's IPC pipe what
+scaling.lua put in place: the shaders, the VSR filter, the mode. Prints
 the GPU time mpv's renderer spends per fresh frame (vo-passes) for each mode.
 Opens a window for a few seconds per mode.
 
@@ -14,8 +14,8 @@ Opens a window for a few seconds per mode.
     python tools/scaling_check.py --window 2560x1440 --size 1920x1080   # costs at 1440p
     python tools/scaling_check.py --vsr intel            # this GPU's VSR as if it were Intel's
 
---vsr changes what glasir_scaling.lua was told about the GPU (normally from
-Glasir's GPU check); a VSR the GPU does not have must fall back to FSR 1.
+--vsr changes what scaling.lua was told about the GPU (normally from
+the app's GPU check); a VSR the GPU does not have must fall back to FSR 1.
 """
 import argparse
 import json
@@ -24,10 +24,11 @@ import subprocess
 import sys
 import time
 
-PIPE = r'\\.\pipe\glasir'
+from app_name import EXE, PIPE, APP_DIR
+
 FFMPEG_FORMAT = {'nv12': 'nv12', 'p010': 'p010le', 'yuy2': 'yuyv422', 'uyvy': 'uyvy422'}
 MODES = ['mpv', 'fsr', 'cnn', 'anime4k', 'vsr', 'mpv']
-FSR = 'glasir_fsr1.glsl'
+FSR = 'fsr1.glsl'
 SHADERS = {
     'mpv': [],
     'fsr': [FSR],
@@ -84,7 +85,7 @@ def gpu_ms(passes, every=False):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument('--app', default=os.path.join(os.path.dirname(__file__), '..', 'out', 'Glasir'))
+    p.add_argument('--app', default=APP_DIR)
     p.add_argument('--format', default='nv12', choices=sorted(FFMPEG_FORMAT))
     p.add_argument('--size', default='960x540', help='capture size (smaller than the window)')
     p.add_argument('--window', default='1280x720', help="mpv's window size")
@@ -100,8 +101,8 @@ def main():
          '-i', f'testsrc2=size={a.size}:rate=60', '-vf', f'format={FFMPEG_FORMAT[a.format]}',
          '-f', 'rawvideo', '-'],
         stdout=subprocess.PIPE)
-    glasir = subprocess.Popen(
-        [os.path.join(a.app, 'Glasir.exe'), '--no-dialogs', '--input-raw', '-', '--raw-format', a.format,
+    process = subprocess.Popen(
+        [os.path.join(a.app, EXE), '--no-dialogs', '--input-raw', '-', '--raw-format', a.format,
          '--set', f'capture.width={width}', '--set', f'capture.height={height}', '--set', 'capture.fps=60',
          '--set', 'window.mode=windowed', '--set', f'video.mode={"hdr" if a.hdr else "sdr"}',
          '--set', 'video.scaling=mpv', '--set', 'debug.mpv_log=1'],
@@ -116,19 +117,19 @@ def main():
             mpv('set_property', 'geometry', a.window)
             time.sleep(1)
         if a.vsr:
-            mpv('change-list', 'script-opts', 'append', f'glasir_scaling-vsr={a.vsr}')
+            mpv('change-list', 'script-opts', 'append', f'scaling-vsr={a.vsr}')
             time.sleep(0.5)
         dims = mpv.get('osd-dimensions') or {}
         print(f"capture {a.size} {a.format}{' HDR' if a.hdr else ''} in a {dims.get('w')}x{dims.get('h')} window")
         for mode in MODES:
-            mpv('script-message', 'glasir-scaling', mode)
+            mpv('script-message', 'app-scaling', mode)
             time.sleep(a.seconds)
             # The timings since the switch only: the passes reset when the shaders change.
             shaders = [os.path.basename(s) for s in (mpv.get('glsl-shaders') or [])]
             vf = [f.get('label') for f in (mpv.get('vf') or []) if f.get('label')]
-            shown = mpv.get('user-data/glasir/scaling')
+            shown = mpv.get('user-data/app/scaling')
             total, big = gpu_ms(mpv.get('vo-passes'), a.passes)
-            vsr_on = 'glasir-vsr' in vf
+            vsr_on = 'app-vsr' in vf
             if mode == 'vsr':
                 # Either the GPU's VSR runs, or FSR 1 stands in for it.
                 good = (vsr_on and shaders == []) or (not vsr_on and shaders == [FSR])
@@ -150,9 +151,9 @@ def main():
         ok = False
     finally:
         try:
-            glasir.wait(10)
+            process.wait(10)
         except subprocess.TimeoutExpired:
-            glasir.kill()
+            process.kill()
             ok = False
         ffmpeg.kill()
 
@@ -160,10 +161,10 @@ def main():
     if os.path.exists(log):
         with open(log, encoding='utf-8', errors='replace') as f:
             for line in f:
-                if 'glasir_scaling' in line or 'Super Resolution' in line:
+                if '[scaling]' in line or 'Super Resolution' in line:
                     print('  ' + line.rstrip())
-    print('PASS' if ok and glasir.returncode == 0 else 'FAIL')
-    return 0 if ok and glasir.returncode == 0 else 1
+    print('PASS' if ok and process.returncode == 0 else 'FAIL')
+    return 0 if ok and process.returncode == 0 else 1
 
 
 if __name__ == '__main__':

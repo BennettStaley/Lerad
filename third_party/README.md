@@ -1,7 +1,7 @@
 # Third-party source in this repo
 
 Only files whose licences allow it are kept here, unmodified, each with its
-licence. Binaries never go in the repo; Glasir downloads them on the user's PC (see
+licence. Binaries never go in the repo; Lerad downloads them on the user's PC (see
 `docs/PLAN.md` and `THIRD-PARTY-NOTICES.md`).
 
 | Folder | What | Version / source | Licence |
@@ -9,6 +9,7 @@ licence. Binaries never go in the repo; Glasir downloads them on the user's PC (
 | `reshade/include/` | ReShade add-on API headers | crosire/reshade tag `v6.8.0` (commit `18deaa52de0c`), `include/` | BSD-3-Clause, `reshade/LICENSE.md` |
 | `mpv/include/mpv/` | mpv client API header (`client.h`) | mpv-player/mpv tag `v0.41.0` (commit `2c219aa822df`), `include/mpv/client.h` | ISC, text at the top of the file |
 | `imgui/` | Dear ImGui: core, DX11 and Win32 backends (the in-game menu, the launcher) | ocornut/imgui tag `v1.92.5` (commit `6d910d5487d1`), the root sources and `backends/imgui_impl_{dx11,win32}` | MIT, `imgui/LICENSE.txt` |
+| `fidelityfx/Kits/FidelityFX/` | AMD FidelityFX API headers for FSR frame generation (`src/framegen/fg_fsr.h`, used by `fg_eval`) | GPUOpen-LibrariesAndSDKs/FidelityFX-SDK tag `v2.4.0` (commit `7539ae8b6568`), `Kits/FidelityFX/api/include/{ffx_api.h,ffx_api_types.h,dx12/ffx_api_dx12.h}` and `Kits/FidelityFX/framegeneration/include/{ffx_framegeneration.h,ffx_framegeneration_api_types.h}` | MIT, text at the top of each file |
 | `artcnn/` | ArtCNN `C4F16` mpv shader (`video.scaling = cnn`), installed to `engine\portable_config\shaders` | Artoriuz/ArtCNN tag `v1.6.2` (commit `f606e1f0ba7e`), `GLSL/ArtCNN_C4F16.glsl`, `LICENSE` | MIT, `artcnn/LICENSE` |
 | `anime4k/` | Anime4K v4 mpv shaders, mode A (`video.scaling = anime4k`), installed to `engine\portable_config\shaders` | bloc97/Anime4K tag `v4.0.1` (commit `4029bf701eca`), `glsl/Restore/` and `glsl/Upscale/`, `LICENSE` | MIT, `anime4k/LICENSE` (the two AutoDownscalePre files: the Unlicense, text at their top) |
 
@@ -16,6 +17,11 @@ licence. Binaries never go in the repo; Glasir downloads them on the user's PC (
 
 ```
 cf3cd150920ea310b4b1e2e4f11ab8d7221a9fc18755f4891a026563311b524c  reshade/include/reshade.hpp
+4d9dcf243ef5efbf03340a02f16b51a22053243a22e8a9a0b3ce91c26982b4bf  fidelityfx/Kits/FidelityFX/api/include/ffx_api.h
+53f07c113a9ba493f297656e4481b6539aed0afc9f3cc8da682aa477d270c46c  fidelityfx/Kits/FidelityFX/api/include/ffx_api_types.h
+c9afbc3c4c673723e9e5369a666f0ff54560543b5a93537f8ff453bf1c3bf530  fidelityfx/Kits/FidelityFX/api/include/dx12/ffx_api_dx12.h
+bc78a18aa95f5157b4699b0602700592b624788c5bc55d1762cb46a1b6557ca1  fidelityfx/Kits/FidelityFX/framegeneration/include/ffx_framegeneration.h
+396596af3df63310674e8036abd2ad0fcd061e61334e7a2c76653a2be3c686b4  fidelityfx/Kits/FidelityFX/framegeneration/include/ffx_framegeneration_api_types.h
 8d83ec8a620c48da7a20d975bd27b3345b24d3f0d5b78ae4c4fe633d61b804eb  reshade/include/reshade_api.hpp
 a716c44b6fbb064dbbb0826687728f21aa71ed45e13564e4dc1cdf36da5bdfa0  reshade/include/reshade_api_device.hpp
 68caa17fef712043e810ab88770c15af009aa3c7693e5c115ddc324f2d0809a7  reshade/include/reshade_api_format.hpp
@@ -53,4 +59,7 @@ a2a9bf7fbc1d75d09660ca2e701e4d7fb0cf5457b94da47e1825032fa2b3671a  anime4k/Anime4
 
 To update: download the files from the new upstream tag, replace them here,
 update the table and the hashes, and note it in the commit message.
-`reshade_overlay.hpp` needs Dear ImGui and is not used yet.
+`reshade_overlay.hpp` is for the Dear ImGui version of `imgui/` (it checks),
+but its docking branch: only `src/framegen/reshade_ui.cpp` includes it, for
+the table of ReShade's functions alone (that file says how). A new ReShade
+tag wants the Dear ImGui tag its header names.

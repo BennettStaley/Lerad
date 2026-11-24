@@ -1,42 +1,36 @@
 // SPDX-License-Identifier: MIT
-// Glasir.exe: reads glasir.ini, opens the capture card, starts mpv and passes
+// The exe: reads the settings file, opens the capture card, starts mpv and passes
 // the card's frames to it.
 //
-// Media Foundation first: Glasir reads the card's frames (NV12, YUY2 or UYVY
+// Media Foundation first: the app reads the card's frames (NV12, YUY2 or UYVY
 // for SDR, 10-bit P010 for HDR) and writes them, tightly packed, to mpv's
 // standard input, minus repeats with dedup. That is what frame generation
 // needs. Cards Media Foundation cannot use fall back to mpv's own DirectShow
 // input: every frame, no dedup, no frame generation.
 //
-// Usage:
-//   Glasir.exe [--play] [--settings FILE] [--set section.key=value ...] [--no-dialogs]
-//   Glasir.exe --input-raw FILE|- [--raw-format nv12|p010|yuy2|uyvy] --set capture.width=W ...
-//   Glasir.exe --list
-//   Glasir.exe --system [--settings FILE] [--set section.key=value ...]
-//   Glasir.exe --version
-//   Glasir.exe --setup [--components mpv,reshade,dlss5] [--newest] [--no-dialogs]
-//   Glasir.exe --update [--no-dialogs]
-//   Glasir.exe --update-from Glasir-x.y.z.zip [--no-dialogs]
-//   Glasir.exe --bug-report [--no-dialogs]
+// Usage (what follows the exe's name):
+//   [--play] [--settings FILE] [--set section.key=value ...] [--no-dialogs]
+//   --input-raw FILE|- [--raw-format nv12|p010|yuy2|uyvy] --set capture.width=W ...
+//   --list
+//   --system [--settings FILE] [--set section.key=value ...]
+//   --version
+//   --setup [--components mpv,reshade,dlss5] [--newest] [--no-dialogs]
+//   --bug-report [--no-dialogs]
 //
 // --input-raw reads tightly packed frames from a file or standard input
 // instead of the card (capture.width, capture.height and capture.fps must be
 // set), for testing the same path without one.
 //
-// Glasir.exe opens its window first (launcher.cpp) unless glasir.ini says
+// The exe opens its window first (launcher.cpp) unless the settings file says
 // [launcher] show = 0 (Shift held at start shows it anyway), --play is given,
 // or nothing may be shown (--no-dialogs, --input-raw).
 //
-// --setup downloads (or updates) the programs Glasir runs on: it asks which,
+// --setup downloads (or updates) the programs the app runs on: it asks which,
 // or with --no-dialogs takes --components (default: mpv, ReShade, and DLSS 5
 // if it is there already). The first start
 // does the same when mpv or ReShade is missing. What is downloaded is the
-// version of each this Glasir was tested with (components.h); --newest takes
+// version of each this version of the app was tested with (components.h); --newest takes
 // the newest instead, to try before it is made the tested one.
-//
-// --update installs the newest Glasir from its GitHub releases if it is
-// newer (update.h); --update-from installs a release zip from disk. The
-// launcher offers the same when its update check finds one.
 //
 // --bug-report saves a bug report (bug_report.h) in "Bug reports"; F9 while
 // playing saves one with the frames on screen, and the launcher has a link.
@@ -57,18 +51,23 @@
 #include <thread>
 #include <vector>
 
+#include "../common/app_env.h"
 #include "../common/framegen_link.h"
 #include "advice.h"
 #include "audio_endpoint.h"
 #include "backdrop.h"
+#include "stream_window.h"
+#include "input_program.h"
 #include "bug_report.h"
 #include "capture.h"
+#include "carry_over.h"
 #include "components.h"
 #include "devices.h"
+#include "magewell.h"
 #include "display.h"
 #include "hdr.h"
 #include "files.h"
-#include "glasir_version.h"
+#include "app_version.h"
 #include "launcher.h"
 #include "log.h"
 #include "mpv_launch.h"
@@ -77,16 +76,16 @@
 #include "settings.h"
 #include "setup_ui.h"
 #include "system_report.h"
-#include "update.h"
+#include "vrr.h"
 
-using namespace glasir;
+using namespace app;
 using Microsoft::WRL::ComPtr;
 
 namespace {
 
-constexpr wchar_t kIpcPipe[] = L"\\\\.\\pipe\\glasir";
-constexpr wchar_t kInstanceMutex[] = L"Local\\Glasir.Instance";
-constexpr wchar_t kQuitEvent[] = L"Local\\Glasir.Quit";
+constexpr wchar_t kIpcPipe[] = L"\\\\.\\pipe\\" APP_ID_W;
+constexpr wchar_t kInstanceMutex[] = L"Local\\" APP_NAME_W L".Instance";
+constexpr wchar_t kQuitEvent[] = L"Local\\" APP_NAME_W L".Quit";
 constexpr wchar_t kAnotherApp[] = L"Is another app (OBS, Discord, the card's own app...) using it?";
 
 struct Args {
@@ -95,22 +94,22 @@ struct Args {
     std::wstring input_raw;
     std::wstring raw_format;
     std::wstring components;  // --setup: what to download, comma-separated
-    std::wstring update_from;  // --update-from: a release zip
+    std::wstring gsync_profile;  // --gsync-profile check | fix | restore (vrr.h)
     bool list = false;
-    bool system = false;  // --system: what Glasir found out about this PC
+    bool system = false;  // --system: what the app found out about this PC
     bool version = false;
     bool setup = false;
     bool newest = false;  // --setup: the newest versions, not the tested ones
-    bool update = false;
+    bool accept_nvidia = false;  // --setup --components video: NVIDIA's licences are accepted (said, or in the window)
     bool bug_report = false;
     bool from_launcher = false;  // setup asked for in the launcher: it comes back after
     bool play = false;           // no launcher
     bool dialogs = true;
 };
 
-// The error the user is shown. It is shown only once Glasir has let go of
+// The error the user is shown. It is shown only once the app has let go of
 // everything (the card, mpv, the one-instance lock), so a dialog left open
-// blocks nothing - not the card, not the next Glasir.
+// blocks nothing - not the card, not the next instance.
 std::wstring g_error;
 
 void report(const std::wstring &text) {
@@ -126,7 +125,7 @@ std::wstring sentence(const std::wstring &text) {
 }
 
 void show(const std::wstring &text, UINT icon) {
-    MessageBoxW(nullptr, text.c_str(), L"Glasir", MB_OK | icon | MB_SETFOREGROUND);
+    MessageBoxW(nullptr, text.c_str(), APP_NAME_W, MB_OK | icon | MB_SETFOREGROUND);
 }
 
 std::wstring app_dir() {
@@ -168,12 +167,16 @@ bool parse_args(Args &a, std::wstring &error) {
             a.setup = true;
         } else if (arg == L"--newest") {
             a.newest = true;
-        } else if (arg == L"--update") {
-            a.update = true;
-        } else if (arg == L"--update-from") {
-            value(a.update_from);
+        } else if (arg == L"--accept-nvidia-licence") {
+            a.accept_nvidia = true;
         } else if (arg == L"--bug-report") {
             a.bug_report = true;
+        } else if (arg == L"--gsync-profile") {
+            if (value(a.gsync_profile) && a.gsync_profile != L"check" && a.gsync_profile != L"fix" &&
+                a.gsync_profile != L"restore") {
+                error = L"--gsync-profile takes check, fix or restore.";
+                ok = false;
+            }
         } else if (arg == L"--components") {
             value(a.components);
         } else if (arg == L"--no-dialogs") {
@@ -197,7 +200,7 @@ bool parse_args(Args &a, std::wstring &error) {
 }
 
 // Text for --list, --version and argument errors: to the file or pipe output
-// goes to, else the console Glasir was started from (Glasir is a windowed
+// goes to, else the console the app was started from (the app is a windowed
 // program, so it attaches only here), else a dialog (a shortcut has neither).
 void print(const std::wstring &text, bool dialogs) {
     HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
@@ -273,12 +276,12 @@ std::wstring device_list_text() {
 }
 
 std::wstring settings_file(const Args &args) {
-    return args.settings_path.empty() ? app_dir() + L"\\glasir.ini" : args.settings_path;
+    return args.settings_path.empty() ? app_dir() + L"\\" APP_INI_W : args.settings_path;
 }
 
 // --system and bug reports: the GPUs, every screen with HDR and VRR, the
 // capture cards in short (not while one is playing: reading a card's modes
-// opens it), and what glasir.ini (with --set) will do on this PC (advice.h).
+// opens it), and what the settings file (with --set) will do on this PC (advice.h).
 std::wstring system_text(const Args &args, bool cards) {
     Settings s;
     std::wstring error, note;
@@ -294,7 +297,7 @@ std::wstring system_text(const Args &args, bool cards) {
     return system_report(system, &devices, &advice) + note;
 }
 
-// One Glasir at a time: a second one asks the first to close (it ends its
+// One instance at a time: a second one asks the first to close (it ends its
 // mpv) and takes over. Nothing else is touched - not other mpv windows.
 class Instance {
 public:
@@ -308,7 +311,7 @@ public:
         if (!mutex_) return false;
         DWORD w = WaitForSingleObject(mutex_, 0);
         if (w == WAIT_TIMEOUT) {
-            log(L"another Glasir is running: asking it to close");
+            log(L"another " APP_NAME_W L" is running: asking it to close");
             // Asked again and again: the other one may have just taken the
             // lock and cleared an earlier request before it was watching.
             const ULONGLONG deadline = GetTickCount64() + 10000;
@@ -392,25 +395,25 @@ private:
 };
 
 // The block the frame generation add-on in mpv reads (common/framegen_link.h).
-GlasirFrameGenLink *create_link(DWORD mpv_pid, HANDLE &mapping) {
-    const std::wstring name = std::format(L"Local\\Glasir_FrameGen_{}", mpv_pid);
-    mapping = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, sizeof(GlasirFrameGenLink),
-                                 name.c_str());
+FrameGenLink *create_link(DWORD mpv_pid, HANDLE &mapping) {
+    wchar_t name[64];
+    swprintf(name, 64, APP_FRAMEGEN_LINK_NAME, mpv_pid);
+    mapping = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, sizeof(FrameGenLink), name);
     if (!mapping) {
         log(L"could not create the frame generation link (error {})", GetLastError());
         return nullptr;
     }
-    auto *link = static_cast<GlasirFrameGenLink *>(
-        MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(GlasirFrameGenLink)));
+    auto *link = static_cast<FrameGenLink *>(
+        MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(FrameGenLink)));
     if (!link) {
         log(L"could not map the frame generation link (error {})", GetLastError());
         CloseHandle(mapping);
         mapping = nullptr;
         return nullptr;
     }
-    link->version = GLASIR_FRAMEGEN_LINK_VERSION;
+    link->version = APP_FRAMEGEN_LINK_VERSION;
     MemoryBarrier();
-    link->magic = GLASIR_FRAMEGEN_LINK_MAGIC;  // last: a reader that sees it sees the rest
+    link->magic = APP_FRAMEGEN_LINK_MAGIC;  // last: a reader that sees it sees the rest
     return link;
 }
 
@@ -430,8 +433,7 @@ struct Source {
     }
 
     bool raw = true;
-    bool hdr_available = false;  // the card has a 10-bit mode (P010) Glasir can read: the menu offers HDR
-    bool watch_signal = false;   // video.mode = auto with a 10-bit capture: SDR or HDR is told from the picture
+    bool hdr_available = false;  // the card has a 10-bit mode (P010) the app can read: the menu offers HDR
     // Media Foundation
     ComPtr<IMFMediaSource> source;
     ComPtr<IMFSourceReader> reader;
@@ -449,14 +451,14 @@ struct Source {
 
 std::wstring open_error(const std::wstring &device, HRESULT hr) {
     if (hr == MF_E_NOT_FOUND)
-        return L"The capture card \"" + device + L"\" disappeared while Glasir was opening it. Check its cable.";
+        return L"The capture card \"" + device + L"\" disappeared while " APP_NAME_W L" was opening it. Check its cable.";
     if (hr == MF_E_INVALIDMEDIATYPE)
-        return L"The capture card \"" + device + L"\" stopped offering the mode Glasir picked. Start Glasir again.";
+        return L"The capture card \"" + device + L"\" stopped offering the mode " APP_NAME_W L" picked. Start " APP_NAME_W L" again.";
     return L"Could not open the capture card \"" + device + L"\" (" + hresult_text(hr) + L"). " + kAnotherApp;
 }
 
 // Picks and opens the source. False after reporting why there is none.
-// devices: the cards (list_devices); screen_height: of the screen Glasir
+// devices: the cards (list_devices); screen_height: of the screen the app
 // plays on, which the automatic capture size goes by (0: unknown, any size).
 // video.mode = auto: s.hdr becomes what the picture is shown as to start
 // with - what auto found last time with a 10-bit capture, SDR without one.
@@ -471,10 +473,8 @@ bool open_source(const Args &args, Settings &s, const std::vector<CaptureDevice>
             report(L"Unknown --raw-format " + args.raw_format + L" (nv12, p010, yuy2 or uyvy).");
             return false;
         }
-        if (s.hdr_auto) {
-            src.watch_signal = src.layout.format == PixelFormat::P010;
-            s.hdr = src.watch_signal && s.auto_found_hdr;
-        }
+        // A 10-bit input is shown as what the signal was found to be last time.
+        if (s.hdr_auto) s.hdr = src.layout.format == PixelFormat::P010 && s.auto_found_hdr;
         src.raw_owned = args.input_raw != L"-";
         src.raw_input = src.raw_owned ? CreateFileW(args.input_raw.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
                                                     OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, nullptr)
@@ -525,7 +525,6 @@ bool open_source(const Args &args, Settings &s, const std::vector<CaptureDevice>
                 ten_bit.hdr = true;
                 if (const auto m = choose_mode(device->modes, ten_bit)) {
                     mode = m;
-                    src.watch_signal = true;
                     s.hdr = s.auto_found_hdr;
                 } else {
                     log(L"video.mode = auto: \"{}\" has no 10-bit mode at {}: SDR", device->name, request_text(s));
@@ -533,6 +532,12 @@ bool open_source(const Args &args, Settings &s, const std::vector<CaptureDevice>
             }
             if (mode) {
                 log(L"capture: \"{}\", {} (Media Foundation)", device->name, mode_text(*mode));
+                if (is_magewell(device->symbolic_link)) {
+                    // Before the stream is opened: it takes the mode from then.
+                    const bool set = set_magewell_low_latency(device->symbolic_link, s.low_latency);
+                    log(L"capture: the card's low latency mode {} (capture.low_latency = {})",
+                        set ? (s.low_latency ? L"is on" : L"is off") : L"could not be set", s.low_latency ? 1 : 0);
+                }
                 const HRESULT hr = open_reader(*device, *mode, src.source, src.reader);
                 if (FAILED(hr)) {
                     report(open_error(device->name, hr));
@@ -550,7 +555,7 @@ bool open_source(const Args &args, Settings &s, const std::vector<CaptureDevice>
     }
     if (!device && !s.hdr) device = choose_device(devices, s.device, any);
     if (!device && s.device.empty()) {
-        // No card offers what glasir.ini asks: still find the card, so the
+        // No card offers what the settings file asks: still find the card, so the
         // message below can say so.
         ModeRequest loose = any;
         loose.hdr = false;
@@ -563,12 +568,12 @@ bool open_source(const Args &args, Settings &s, const std::vector<CaptureDevice>
     const std::wstring wanted = s.device.empty() ? L"" : L" \"" + s.device + L"\"";
     if (s.hdr) {
         report(device ? L"The capture card \"" + device->name + L"\" has no 10-bit HDR mode (P010) at " +
-                            request_text(s) + L". Set video.mode = sdr in glasir.ini, or another size or rate."
+                            request_text(s) + L". Set video.mode = sdr in " APP_INI_W L", or another size or rate."
                       : L"No capture card" + wanted + L" with a 10-bit HDR mode (P010) was found.");
         return false;
     }
     if (s.path == Settings::CapturePath::MediaFoundation) {
-        report(device ? L"The capture card \"" + device->name + L"\" offers no mode Glasir can read at " +
+        report(device ? L"The capture card \"" + device->name + L"\" offers no mode " APP_NAME_W L" can read at " +
                             request_text(s) + L". Set capture.path = auto to let mpv open it through DirectShow."
                       : L"No capture card" + wanted + L" was found through Media Foundation.");
         return false;
@@ -592,16 +597,16 @@ bool open_source(const Args &args, Settings &s, const std::vector<CaptureDevice>
         report(s.device.empty() ? std::wstring(L"No capture card was found. Check that it is plugged in and its "
                                                L"driver is installed.")
                                 : L"The capture card \"" + s.device +
-                                      L"\" from glasir.ini was not found. \"Glasir.exe --list\" shows the cards "
+                                      L"\" from " APP_INI_W L" was not found. \"" APP_EXE_W L" --list\" shows the cards "
                                       L"this PC has.");
         return false;
     }
     if (device) src.dshow_mode = choose_mode(device->modes, any);
     if (device && !device->modes.empty() && !src.dshow_mode) {
-        // The card says what it offers, and what glasir.ini asks is not there:
+        // The card says what it offers, and what the settings file asks is not there:
         // say so rather than let the driver pick something else.
         report(L"The capture card \"" + name + L"\" does not offer " + request_text(s) +
-               L". \"Glasir.exe --list\" shows its modes; set capture.width, capture.height and capture.fps to "
+               L". \"" APP_EXE_W L" --list\" shows its modes; set capture.width, capture.height and capture.fps to "
                L"one of them, or to 0.");
         return false;
     }
@@ -614,14 +619,14 @@ bool open_source(const Args &args, Settings &s, const std::vector<CaptureDevice>
     return true;
 }
 
-// Waits for the quit event (another Glasir starting) and ends mpv.
+// Waits for the quit event (another instance starting) and ends mpv.
 class QuitWatcher {
 public:
     QuitWatcher(HANDLE quit_event, MpvProcess &mpv) : stop_(CreateEventW(nullptr, TRUE, FALSE, nullptr)) {
         thread_ = std::thread([this, quit_event, &mpv] {
             HANDLE handles[] = {quit_event, stop_};
             if (WaitForMultipleObjects(2, handles, FALSE, INFINITE) == WAIT_OBJECT_0) {
-                log(L"another Glasir started: closing");
+                log(L"another " APP_NAME_W L" started: closing");
                 requested = true;
                 mpv.stop(kIpcPipe, 2000);
             }
@@ -647,7 +652,7 @@ void choose_audio(const Settings &s, const Source &src, MpvPlan &plan) {
     const auto container = video_container(src.symbolic_link);
     if (const auto audio = find_card_audio(inputs, src.device_name, container, s.audio_device)) {
         plan.audio_device = audio->id;
-        log(L"audio: \"{}\"{}", audio->name, s.audio_device.empty() ? L" (the card's)" : L" (glasir.ini)");
+        log(L"audio: \"{}\"{}", audio->name, s.audio_device.empty() ? L" (the card's)" : L" (" APP_INI_W L")");
         return;
     }
     plan.audio_missing = true;
@@ -659,31 +664,34 @@ void choose_audio(const Settings &s, const Source &src, MpvPlan &plan) {
 std::wstring capture_end_error(HRESULT ended, const std::wstring &device) {
     if (card_in_use(ended))
         return L"The capture card \"" + device + L"\" is in use by another app (OBS, Discord, the card's own "
-               L"app...). Close it and start Glasir again.";
+               L"app...). Close it and start " APP_NAME_W L" again.";
     if (ended == kUnreadableFrames)
-        return L"The capture card \"" + device + L"\" sends frames in a layout Glasir cannot read (logs\\glasir.log "
-               L"has the details). Set capture.path = directshow in glasir.ini to let mpv read it.";
+        return L"The capture card \"" + device + L"\" sends frames in a layout " APP_NAME_W L" cannot read (logs\\" APP_ID_W L".log "
+               L"has the details). Set capture.path = directshow in " APP_INI_W L" to let mpv read it.";
     return L"The capture card \"" + device + L"\" stopped sending frames (" + hresult_text(ended) +
            L"). Check its cable and that the console is on.";
 }
 
 enum class SetupResult { Play, Stop, Failed };
 
-// Downloads what Glasir runs on: when mpv or ReShade is missing, or with
-// --setup (which then ends Glasir). Play: go on (with what is there).
+// Downloads what the app runs on: when mpv or ReShade is missing, or with
+// --setup (which then ends the app). Play: go on (with what is there).
 SetupResult setup(const Args &args, const std::wstring &dir, const std::wstring &engine) {
     const bool need = !component_installed(engine, Component::Mpv) || !component_installed(engine, Component::ReShade);
     if (!args.setup && !need) return SetupResult::Play;
     // DLSS 5 is off unless asked for, so its download is ticked only where
     // it is installed already (an update).
     const bool dlss5_default = component_installed(engine, Component::Dlss5);
+    const bool dlssfg_default = component_installed(engine, Component::DlssFg);  // likewise
     std::vector<Component> which;
-    if (!args.dialogs) {
+    // Named components are not asked about (the launcher's "Download").
+    if (!args.dialogs || !args.components.empty()) {
         // Nothing is downloaded unasked when no one can be asked.
         if (!args.setup) return SetupResult::Play;
         if (args.components.empty()) {
             which = {Component::Mpv, Component::ReShade};
             if (dlss5_default) which.push_back(Component::Dlss5);
+            if (dlssfg_default) which.push_back(Component::DlssFg);
         }
         for (size_t at = 0; at < args.components.size();) {
             size_t comma = args.components.find(L',', at);
@@ -693,8 +701,19 @@ SetupResult setup(const Args &args, const std::wstring &dir, const std::wstring 
             if (name == L"mpv") which.push_back(Component::Mpv);
             else if (name == L"reshade") which.push_back(Component::ReShade);
             else if (name == L"dlss5") which.push_back(Component::Dlss5);
-            else {
-                report(L"Unknown component " + name + L" (mpv, reshade or dlss5).");
+            else if (name == L"dlssfg") which.push_back(Component::DlssFg);
+            else if (name == L"video") {
+                if (!args.accept_nvidia) {
+                    report(L"video is NVIDIA Video Frame Generation, under NVIDIA's licences (the NVIDIA Software License "
+                           L"Agreement, the Product-Specific Terms for NVIDIA AI Products and the NVIDIA Open Model "
+                           L"License, on nvidia.com/en-us/agreements). Add --accept-nvidia-licence if you accept them.");
+                    return SetupResult::Failed;
+                }
+                which.push_back(Component::Video);
+            } else if (name == L"anr") {
+                which.push_back(Component::Anr);
+            } else {
+                report(L"Unknown component " + name + L" (mpv, reshade, dlss5, dlssfg, video or anr).");
                 return SetupResult::Failed;
             }
         }
@@ -709,13 +728,15 @@ SetupResult setup(const Args &args, const std::wstring &dir, const std::wstring 
             return args.setup || !component_installed(engine, Component::Mpv) ? SetupResult::Stop : SetupResult::Play;
         }
         which = *chosen;
+        // Updated along with the rest where it is there already.
+        if (dlssfg_default) which.push_back(Component::DlssFg);
     }
 
     std::wstring error;
     if (!run_setup(engine, which, args.newest ? Versions::Newest : Versions::Tested, args.dialogs, error)) {
         if (error != L"cancelled") {
-            const std::wstring text = L"Glasir could not download everything: " + sentence(error) +
-                                      L"\n\nStart Glasir again to try again. logs\\glasir.log has the details.";
+            const std::wstring text = APP_NAME_W L" could not download everything: " + sentence(error) +
+                                      L"\n\nStart " APP_NAME_W L" again to try again. logs\\" APP_ID_W L".log has the details.";
             // Shown now: nothing is held yet but the one-instance lock.
             if (args.dialogs) show(text, MB_ICONERROR);
             else report(text);
@@ -725,7 +746,7 @@ SetupResult setup(const Args &args, const std::wstring &dir, const std::wstring 
     }
     if (args.setup) {
         if (args.dialogs) {
-            if (!args.from_launcher) show(L"Glasir is set up. Start it again to play.", MB_ICONINFORMATION);
+            if (!args.from_launcher) show(APP_NAME_W L" is set up. Start it again to play.", MB_ICONINFORMATION);
         } else {
             std::wstring text = L"Installed in " + engine + L":\n";
             for (const auto &line : installed_versions(engine)) text += L"  " + line + L"\n";
@@ -737,7 +758,7 @@ SetupResult setup(const Args &args, const std::wstring &dir, const std::wstring 
 }
 
 // What the user changed while playing (volume, boost, delay) is kept in
-// glasir.ini for next time. Mute is not: a muted start would be a surprise.
+// the settings file for next time. Mute is not: a muted start would be a surprise.
 void keep_changes(const MpvWatch &watch, const std::wstring &settings_path) {
     std::vector<SettingValue> values;
     auto keep = [&](const char *property, const wchar_t *key, long lo, long hi) {
@@ -751,24 +772,65 @@ void keep_changes(const MpvWatch &watch, const std::wstring &settings_path) {
         log(L"keeping audio.{} = {} in {}", key, n, settings_path);
     };
     keep("volume", L"volume", 0, 100);
-    keep("user-data/glasir/audio-boost", L"boost", 100, 400);
-    keep("user-data/glasir/audio-delay", L"delay_ms", 0, 1000);
+    keep("user-data/app/audio-boost", L"boost", 100, 400);
+    keep("user-data/app/audio-delay", L"delay_ms", 0, 1000);
     if (!values.empty()) save_settings(settings_path, values);
 }
 
-// mpv's exit code when the in-game menu asks Glasir to start the picture
-// again (after it changed glasir.ini, e.g. SDR to HDR).
+// mpv's exit code when the in-game menu asks the app to start the picture
+// again (after it changed the settings file to something that needs the card
+// opened in another mode: an 8-bit SDR capture to HDR or Automatic).
 constexpr DWORD kRestartCode = 42;
-// Said on screen once the picture is back, when Glasir restarted it itself.
-std::wstring g_restart_toast;
-// video.mode = auto: what the signal turned out to be, for the start that
-// follows (also kept in glasir.ini for the next time; this does not depend
-// on the file being written, or on a --set that says otherwise).
+// What the signal turned out to be while the app followed it, for the start
+// that follows (also kept in the settings file for the next time; this does
+// not depend on the file being written, or on a --set that says otherwise).
 std::optional<bool> g_found_hdr;
+
+// The settings file's [hdr] as it is now, into s: the menu keeps what it
+// changes there while playing (fitting, the screen's peak, the curve), so a
+// picture that goes to HDR again is shown as the next start would show it.
+// What was given with --set still counts. A file that cannot be read leaves
+// s as it is, and so does a value that makes no sense. Not load_settings: it
+// writes a new file where it can open none, and the menu may be replacing
+// the file at this moment.
+void refresh_hdr_settings(const Args &args, const std::wstring &settings_path, Settings &s) {
+    std::string bytes;
+    if (!read_shared(settings_path, bytes)) return;
+    if (bytes.size() >= 3 && bytes.compare(0, 3, "\xEF\xBB\xBF") == 0) bytes.erase(0, 3);
+    const std::wstring text = widen(bytes);
+    Settings now = s;
+    std::wstring error;
+    bool in_hdr = false;
+    for (size_t at = 0; at < text.size();) {
+        size_t end = text.find(L'\n', at);
+        if (end == std::wstring::npos) end = text.size();
+        std::wstring line = text.substr(at, end - at);
+        at = end + 1;
+        // A comment after a value needs a space before it, as load_settings reads it.
+        for (size_t i = 1; i < line.size(); ++i)
+            if ((line[i] == L';' || line[i] == L'#') && iswspace(line[i - 1])) {
+                line.resize(i);
+                break;
+            }
+        while (!line.empty() && iswspace(line.back())) line.pop_back();
+        line.erase(0, line.find_first_not_of(L" \t"));
+        if (line.empty() || line[0] == L';' || line[0] == L'#') continue;
+        if (line[0] == L'[')
+            in_hdr = _wcsicmp(line.c_str(), L"[hdr]") == 0;
+        else if (in_hdr)
+            apply_override(now, L"hdr." + line, error);
+    }
+    for (const auto &o : args.overrides) apply_override(now, o, error);
+    s.hdr_output = now.hdr_output;
+    s.hdr_fit_to_screen = now.hdr_fit_to_screen;
+    s.display_peak_nits = now.display_peak_nits;
+    s.tone_mapping = now.tone_mapping;
+    s.hdr_dynamic_peak = now.hdr_dynamic_peak;
+}
 
 // F9 while playing: the frame generation add-on saves the frames on screen,
 // then asks for the rest of the report with "script-message
-// glasir-bug-report <folder> <why>" (no folder: why there are no frames).
+// app-bug-report <folder> <why>" (no folder: why there are no frames).
 // One report is made at a time; an F9 meanwhile waits for it (the latest).
 class InGameReports {
 public:
@@ -783,7 +845,7 @@ public:
 
     // On MpvWatch's thread.
     void on_message(const std::vector<std::string> &words) {
-        if (words.front() != "glasir-bug-report") return;
+        if (words.front() != "app-bug-report") return;
         Request r{words.size() > 1 ? widen(words[1]) : L"", words.size() > 2 ? words[2] : ""};
         std::lock_guard lock(m_);
         if (running_) {
@@ -840,7 +902,7 @@ private:
                                                  : L" (the frames could not be saved)";
         }
         // A toast from the overlay (after DLSS 5 and frame generation), not mpv's OSD.
-        mpv_.send(pipe_, ipc_command({L"script-message", L"glasir-toast", text, L"4000"}), 2000);
+        mpv_.send(pipe_, ipc_command({L"script-message", L"app-toast", text, L"4000"}), 2000);
     }
 
     const Args &args_;
@@ -860,8 +922,8 @@ int run(const Args &args, bool again, bool &stuck, bool &restart) {
     const std::wstring dir = app_dir();
     if (again) log(L"starting the picture again");
 
-    // One Glasir at a time, before anything is read or written: one still
-    // closing writes glasir.ini and ReShade.ini as it goes, and setup may
+    // One instance at a time, before anything is read or written: one still
+    // closing writes the settings file and ReShade.ini as it goes, and setup may
     // replace mpv.exe.
     HANDLE quit_event = CreateEventW(nullptr, TRUE, FALSE, kQuitEvent);
     Instance instance(quit_event);
@@ -870,7 +932,7 @@ int run(const Args &args, bool again, bool &stuck, bool &restart) {
         ~CloseEvent() { CloseHandle(h); }
     } close_event{quit_event};
     if (!instance.take()) {
-        report(L"Another Glasir is running and did not close.");
+        report(L"Another " APP_NAME_W L" is running and did not close.");
         return 1;
     }
 
@@ -881,14 +943,14 @@ int run(const Args &args, bool again, bool &stuck, bool &restart) {
     case SetupResult::Failed: return 1;
     }
     for (const auto &line : installed_versions(engine)) log(L"{}", line);
-    for (Component c : {Component::Mpv, Component::ReShade, Component::Dlss5})
+    for (Component c : {Component::Mpv, Component::ReShade, Component::Dlss5, Component::DlssFg})
         if (component_installed(engine, c) && !component_as_tested(engine, c))
-            log(L"{} is not the version this Glasir was tested with (Update in Glasir's window installs it)",
+            log(L"{} is not the version this " APP_NAME_W L" was tested with (Update in " APP_NAME_W L"'s window installs it)",
                 component_name(c));
 
     Settings s;
     std::wstring error;
-    const std::wstring settings_path = args.settings_path.empty() ? dir + L"\\glasir.ini" : args.settings_path;
+    const std::wstring settings_path = args.settings_path.empty() ? dir + L"\\" APP_INI_W : args.settings_path;
     if (!load_settings(settings_path, s, error)) {
         report(error);
         return 2;
@@ -899,6 +961,8 @@ int run(const Args &args, bool again, bool &stuck, bool &restart) {
             return 2;
         }
     if (g_found_hdr) s.auto_found_hdr = *g_found_hdr;
+    // As the settings file says; open_source makes s.hdr what the frames are shown as.
+    PictureMode mode = s.hdr_auto ? PictureMode::Auto : s.hdr ? PictureMode::Hdr : PictureMode::Sdr;
 
     MpvPlan plan;
     plan.mpv_exe = engine + L"\\mpv.exe";
@@ -908,16 +972,16 @@ int run(const Args &args, bool again, bool &stuck, bool &restart) {
     if (s.mpv_log) plan.log_file = dir + L"\\logs\\mpv.log";
     if (!file_exists(plan.mpv_exe)) {
         report(L"mpv.exe is missing from " + engine +
-               L". Start Glasir without --no-dialogs, or run \"Glasir.exe --setup\", to download it.");
+               L". Start " APP_NAME_W L" without --no-dialogs, or run \"" APP_EXE_W L" --setup\", to download it.");
         return 1;
     }
     CreateDirectoryW(plan.screenshot_dir.c_str(), nullptr);
-    // The screen Glasir plays on and the GPU mpv draws on (glasir.ini's
+    // The screen the app plays on and the GPU mpv draws on (the settings file's
     // [display], else the primary screen and the GPU it is plugged into).
     const SystemInfo system = survey_system(s);
     for (const DisplayInfo &d : system.displays)
         log(L"screen {}{}: {}{}", d.number, d.primary ? L" (main)" : L"", display_text(d),
-            d.device == system.display.device ? L"  <- Glasir plays here" : L"");
+            d.device == system.display.device ? L"  <- " APP_NAME_W L" plays here" : L"");
     if (!system.monitor_matched && !s.monitor.empty())
         log(L"display.monitor = {} names no screen: playing on the main one", s.monitor);
     for (const GpuInfo &g : system.gpus) log(L"GPU: {}", gpu_text(g));
@@ -945,9 +1009,9 @@ int run(const Args &args, bool again, bool &stuck, bool &restart) {
             s.framegen && !s.dedup ? L" but needs dedup = 1: it stays off" : L"");
         std::wstring why;
         if (!installed)
-            why = L" (not downloaded; \"Glasir.exe --setup\" offers it)";
+            why = L" (not downloaded; \"" APP_EXE_W L" --setup\" offers it)";
         else if (loaded && !dlss5)
-            why = L" (glasir.ini; the menu can switch it on)";
+            why = L" (" APP_INI_W L"; the menu can switch it on)";
         else if (!dlss5)
             why = L" (needs an RTX 30, 40 or 50 series GPU; [dlss5] enabled = on tries anyway)";
         log(L"DLSS 5: {}{}; GPU: {}", dlss5 ? L"on" : L"off", why, gpu.found ? gpu.name : L"unknown");
@@ -997,35 +1061,58 @@ int run(const Args &args, bool again, bool &stuck, bool &restart) {
     plan.audio_log = dir + L"\\logs\\audio.log";
     if (s.audio) choose_audio(s, src, plan);
 
+    // A 10-bit capture carries SDR or HDR alike, so what it is shown as can
+    // change while playing: with the console's signal, or in the menu.
+    const bool live = src.raw && src.layout.format == PixelFormat::P010;
+
     // The in-game menu keeps what it changes in the same file.
-    SetEnvironmentVariableW(L"GLASIR_SETTINGS", settings_path.c_str());
-    SetEnvironmentVariableW(L"GLASIR_VIDEO_MODE", s.hdr ? L"hdr" : L"sdr");
-    SetEnvironmentVariableW(L"GLASIR_VIDEO_AUTO", s.hdr_auto ? L"1" : L"0");
-    SetEnvironmentVariableW(L"GLASIR_HDR_AVAILABLE", src.hdr_available ? L"1" : L"0");
-    // What Glasir found out about the screen, for the add-ons inside mpv.
-    // VRR: "on", "off" or "unknown" (glasir.ini's display.vrr, else as found).
-    // They describe the screen Glasir plays on (display.monitor).
+    set_env(L"SETTINGS", settings_path);
+    set_env(L"VIDEO_MODE", s.hdr ? L"hdr" : L"sdr");  // the signal, as shown to start with
+    set_env(L"VIDEO_AUTO", s.hdr_auto ? L"1" : L"0");
+    set_env(L"PICTURE_LIVE", live ? L"1" : L"0");
+    set_env(L"HDR_AVAILABLE", src.hdr_available ? L"1" : L"0");
+    // What the app found out about the screen, for the add-ons inside mpv.
+    // VRR: "on", "off" or "unknown" (the settings file's display.vrr, else as found).
+    // They describe the screen the app plays on (display.monitor).
     {
         const DisplayInfo &d = plan.display;
         const wchar_t *vrr =
             vrr_for_addons(d.vrr, s.vrr == Settings::Vrr::On ? 1 : s.vrr == Settings::Vrr::Off ? 0 : -1);
-        SetEnvironmentVariableW(L"GLASIR_DISPLAY_VRR", vrr);
-        SetEnvironmentVariableW(L"GLASIR_DISPLAY_HZ", std::format(L"{:.3f}", d.refresh_hz).c_str());
+        set_env(L"DISPLAY_VRR", vrr);
+        set_env(L"DISPLAY_HZ", std::format(L"{:.3f}", d.refresh_hz));
         // For the menu: which screen that is ("1 (PA279CDV)"), and whether
         // the VRR state is the user's word (display.vrr) or what was found.
         std::wstring screen;
         if (d.found)
             screen = (d.number > 0 ? std::to_wstring(d.number) : d.device) +
                      (d.name.empty() ? std::wstring() : L" (" + d.name + L")");
-        SetEnvironmentVariableW(L"GLASIR_DISPLAY_NAME", screen.c_str());
-        SetEnvironmentVariableW(L"GLASIR_DISPLAY_VRR_SET", s.vrr == Settings::Vrr::Auto ? L"0" : L"1");
+        set_env(L"DISPLAY_NAME", screen);
+        set_env(L"DISPLAY_VRR_SET", s.vrr == Settings::Vrr::Auto ? L"0" : L"1");
+        // Every screen, for frame generation: the window can be moved to
+        // another one while mpv runs, and the add-on goes by the screen it is
+        // on (display.vrr speaks for the screen the app plays on only).
+        const std::wstring screens = screens_for_addons(
+            system.displays, d.device, s.vrr == Settings::Vrr::On ? 1 : s.vrr == Settings::Vrr::Off ? 0 : -1);
+        set_env(L"SCREENS", screens);
+        log(L"for the add-ons: " APP_ENV_W("SCREENS") L"={}", screens);
         // HDR (hdr.h): the menu's white, and what is done with an HDR capture.
-        for (const auto &[name, value] : hdr_environment(s, d)) SetEnvironmentVariableW(name.c_str(), value.c_str());
+        for (const auto &[name, value] : hdr_environment(s, d, live)) set_env(name.c_str(), value);
         if (s.hdr) log(L"HDR: {}", hdr_plan_text(hdr_plan(s, d)));
-        log(L"for the add-ons: GLASIR_DISPLAY_VRR={} GLASIR_DISPLAY_HZ={:.3f}", vrr, d.refresh_hz);
+        log(L"for the add-ons: " APP_ENV_W("DISPLAY_VRR") L"={} " APP_ENV_W("DISPLAY_HZ") L"={:.3f}", vrr, d.refresh_hz);
     }
-    SetEnvironmentVariableW(L"GLASIR_WINDOW_MODE",
-                            s.fullscreen ? L"fullscreen" : s.borderless ? L"borderless" : L"windowed");
+    set_env(L"WINDOW_MODE", s.fullscreen ? L"fullscreen" : s.borderless ? L"borderless" : L"windowed");
+    // The stream window's switch, for the add-on to find when mpv is up.
+    StreamWindow stream;
+    stream.offer(s.stream_window);
+    set_env(L"STREAM_BRIGHTNESS", std::to_wstring(s.stream_brightness));
+    // The input program runs with the picture (not with a test source): the
+    // menu then offers the mouse's sensitivity.
+    const bool input_wanted = s.input && args.input_raw.empty() && input_program_found(s, dir);
+    set_env(L"INPUT", input_wanted ? L"1" : L"0");
+    // Where the input program says how far the picture is to be moved ahead
+    // of the console (view_shift.h): a name both it and the add-on are told.
+    const std::wstring view_shift = input_wanted ? L"Local\\" APP_NAME_W L"-view-shift" : std::wstring();
+    set_env(L"VIEW_SHIFT", view_shift);
     MpvProcess mpv;
     if (!mpv.start(join_command_line(plan.mpv_exe, mpv_arguments(plan, s)), plan.raw, error)) {
         report(error);
@@ -1047,18 +1134,50 @@ int run(const Args &args, bool again, bool &stuck, bool &restart) {
         };
         backdrop.start(mpv.pid(), std::move(w));
     }
+    stream.start(mpv.pid(), [settings_path] {
+        // Its close box: off for the next start too.
+        save_settings(settings_path, {{L"stream", L"window", L"0"}});
+    });
+    // The input program (the console played with this PC's mouse and
+    // keyboard): with the picture, not with a test source. The picture plays
+    // without it if it does not start.
+    InputProgram input;
+    if (s.input && args.input_raw.empty() && !input_wanted)
+        log(L"input: no input program at \"{}\" ([input] program)", input_program_file(s, dir));
+    if (input_wanted) {
+        std::wstring why;
+        if (!input.start(input_program_file(s, dir), settings_path, plan.ipc_pipe, view_shift,
+                         dir + L"\\logs\\input.log", why)) {
+            log(L"input: {}", why);
+        } else {
+            // The keyboard is the game's from here on: say how to get out.
+            // The keys are the input program's defaults.
+            mpv.send(plan.ipc_pipe,
+                     ipc_command({L"script-message", L"app-toast",
+                                  L"Mouse and keyboard play the console.  F11: this menu.  F10: keys to the PC and "
+                                  L"back.  Alt+F4: quit.",
+                                  L"9000"}),
+                     3000);
+        }
+    }
     int rc = 0;
-    bool signal_changed = false;  // video.mode = auto: the picture starts again as the other kind
-    bool quit_asked = false;      // another Glasir asked this one to close: no restart, whatever else asks
+    bool quit_asked = false;      // another instance asked this one to close: no restart, whatever else asks
+    const bool found_before = s.auto_found_hdr;
+    // The menu's Signal, for the loop that passes the frames on (-1: nothing asked).
+    std::atomic<int> asked_mode{-1};
     InGameReports reports(args, dir, settings_path, plan.ipc_pipe, mpv, advice_now);  // after changes stops: it calls this
     MpvWatch changes;
-    changes.on_message = [&reports, &backdrop](const std::vector<std::string> &words) {
-        if (words.front() == "glasir-window" && words.size() > 1 && words[1] == "again")
-            backdrop.place_again();  // mpv left its own full screen (glasir_window.lua)
-        else if (words.front() == "glasir-window" && words.size() > 1)
+    changes.on_message = [&reports, &backdrop, &asked_mode](const std::vector<std::string> &words) {
+        if (words.front() == "app-window" && words.size() > 1 && words[1] == "again") {
+            backdrop.place_again();  // mpv left its own full screen (window.lua)
+        } else if (words.front() == "app-window" && words.size() > 1) {
             backdrop.set_borderless(words[1] == "borderless");
-        else
+        } else if (words.front() == "app-picture" && words.size() > 1) {
+            // The menu's Signal (or a tool): auto, sdr or hdr.
+            if (const auto m = picture_mode(words[1])) asked_mode = int(*m);
+        } else {
             reports.on_message(words);
+        }
     };
     {
         QuitWatcher watcher(quit_event, mpv);
@@ -1084,7 +1203,7 @@ int run(const Args &args, bool again, bool &stuck, bool &restart) {
                        kAnotherApp);
             else
                 report(mpv.exited() ? std::format(L"mpv closed while starting (exit code {}). Set debug.mpv_log = 1 "
-                                                  L"in glasir.ini and look at logs\\mpv.log.",
+                                                  L"in " APP_INI_W L" and look at logs\\mpv.log.",
                                                   mpv.exit_code())
                                     : std::wstring(L"mpv did not answer while starting."));
             rc = 1;
@@ -1092,13 +1211,13 @@ int run(const Args &args, bool again, bool &stuck, bool &restart) {
 
         // Follows what the user changes while playing.
         if (loaded && !changes.start(mpv, plan.ipc_pipe,
-                                     {"volume", "user-data/glasir/audio-boost", "user-data/glasir/audio-delay"}))
+                                     {"volume", "user-data/app/audio-boost", "user-data/app/audio-delay"}))
             log(L"could not follow mpv's volume: changes while playing are not kept");
 
         if (!loaded) {
             mpv.stop(plan.ipc_pipe, 1000);
         } else if (!plan.raw) {
-            // mpv reads the card itself; Glasir stays to keep one instance.
+            // mpv reads the card itself; the app stays to keep one instance.
             mpv.exited(INFINITE);
         } else {
             const size_t frame_bytes = src.layout.bytes();
@@ -1123,20 +1242,42 @@ int run(const Args &args, bool again, bool &stuck, bool &restart) {
             pump->reader = src.reader;
             pump->raw_input = src.raw_input;
             HANDLE link_map = nullptr;
-            GlasirFrameGenLink *link = nullptr;
+            FrameGenLink *link = nullptr;
             if (s.dedup) {
-                pump->repeats = std::make_unique<RepeatFilter>(src.layout.format, src.layout.width,
-                                                               src.layout.height, s.dedup_threshold,
-                                                               s.dedup_keepalive_ms);
+                // Without the filter every frame is published as new, stamped
+                // into the link like the filter's new frames.
+                // Automatic at a rate a game fills: every frame is new, but
+                // only while the card sends that rate (the filter counts).
+                const bool by_rate =
+                    s.every_frame == Settings::EveryFrame::Auto && capture_rate_is_game_rate(src.fps);
+                const bool every = s.every_frame == Settings::EveryFrame::On || by_rate;
+                if (!every || by_rate)
+                    pump->repeats = std::make_unique<RepeatFilter>(src.layout.format, src.layout.width,
+                                                                   src.layout.height, s.dedup_threshold,
+                                                                   s.dedup_keepalive_ms,
+                                                                   s.every_frame != Settings::EveryFrame::Off,
+                                                                   by_rate ? src.fps : 0.0);
                 link = create_link(mpv.pid(), link_map);
                 pump->slot.set_link(link);
-                log(L"dedup on: threshold {}, keepalive {} ms, frame generation link {}", s.dedup_threshold,
-                    s.dedup_keepalive_ms, link ? L"open" : L"unavailable");
+                if (every)
+                    log(L"every captured frame is a game frame (frames.every_frame = {}, {:.3f} fps): pictures are "
+                        L"not compared{}, frame generation link {}",
+                        every_frame_name(s.every_frame), src.fps,
+                        by_rate ? L" while the card sends that rate" : L"", link ? L"open" : L"unavailable");
+                else
+                    log(L"dedup on: threshold {}, keepalive {} ms, the game's rhythm {}, frame generation link {}",
+                        s.dedup_threshold, s.dedup_keepalive_ms,
+                        s.every_frame != Settings::EveryFrame::Off ? L"held" : L"not held (frames.every_frame = off)",
+                        link ? L"open" : L"unavailable");
             }
-            const Signal shown = s.hdr ? Signal::Hdr : Signal::Sdr;
-            if (src.watch_signal) {
-                pump->signal = std::make_unique<SignalMonitor>(shown, src.layout.width, src.layout.height);
-                log(L"video.mode = auto: shown as {} until the picture says otherwise", signal_name(shown));
+            bool shown_hdr = s.hdr;
+            if (live) {
+                // The signal is watched in every mode: it is there to follow
+                // as soon as the menu asks for that.
+                pump->signal = std::make_unique<SignalMonitor>(s.hdr ? Signal::Hdr : Signal::Sdr, src.layout.width,
+                                                               src.layout.height);
+                log(L"picture: shown as {}{} (video.mode = {})", shown_hdr ? L"HDR" : L"SDR",
+                    mode == PictureMode::Auto ? L" until the picture says otherwise" : L"", picture_mode_name(mode));
             }
             std::thread reader([pump] {
                 const FrameSinks sinks{pump->repeats.get(), pump->signal.get()};
@@ -1150,7 +1291,8 @@ int run(const Args &args, bool again, bool &stuck, bool &restart) {
             UINT64 sent = 0;
             bool stalled = false;
             BehindLog behind;
-            const ULONGLONG started = GetTickCount64();
+            ULONGLONG switch_after = 0;  // a switch mpv did not take is tried again then
+            bool by_menu = false;        // the switch to make is the menu's (not said in a toast)
             for (;;) {
                 const std::vector<BYTE> *frame = slot.take(1000);
                 if (!frame) {
@@ -1163,27 +1305,47 @@ int run(const Args &args, bool again, bool &stuck, bool &restart) {
                 if (!mpv.write_frame(frame->data(), frame_bytes)) break;
                 ++sent;
                 behind.check(slot);
-                if (!g_restart_toast.empty() && GetTickCount64() - started > 2500) {
-                    // Once the overlay that draws it is up.
-                    mpv.send(plan.ipc_pipe, ipc_command({L"script-message", L"glasir-toast", g_restart_toast, L"4000"}),
-                             500);
-                    g_restart_toast.clear();
+                if (!pump->signal) continue;
+                // The console went from SDR to HDR or back (or the first
+                // guess was wrong), or the menu asks for another picture:
+                // mpv shows the frames as that from here on. The capture,
+                // mpv, DLSS 5 and frame generation keep running.
+                if (const int m = asked_mode.exchange(-1); m >= 0) {
+                    mode = PictureMode(m);
+                    by_menu = true;
+                    log(L"picture: video.mode = {} is asked for while playing", picture_mode_name(mode));
                 }
-                if (pump->signal && pump->signal->found.load() != shown) {
-                    // The console went from SDR to HDR or back (or the first
-                    // guess was wrong): the picture starts again as that.
-                    // glasir.ini is written once mpv is gone (below): the
-                    // menu in mpv may be writing it now.
-                    const bool hdr = pump->signal->found.load() == Signal::Hdr;
-                    log(L"video.mode = auto: the signal is {}; starting the picture again", hdr ? L"HDR" : L"SDR");
-                    g_found_hdr = hdr;
-                    signal_changed = true;
-                    break;
+                const bool found_hdr = pump->signal->found.load() == Signal::Hdr;
+                // The settings file is written once mpv is gone (below): the
+                // menu in mpv may be writing it now.
+                if (mode == PictureMode::Auto) g_found_hdr = found_hdr;
+                const bool want_hdr = shown_as_hdr(mode, found_hdr);
+                if (want_hdr == shown_hdr) {
+                    by_menu = false;
+                    continue;
                 }
+                if (GetTickCount64() < switch_after) continue;
+                // [hdr] as the menu has left it (fitting, the screen's peak, the curve).
+                if (want_hdr) refresh_hdr_settings(args, settings_path, s);
+                std::string commands = picture_commands(plan, s, want_hdr);
+                // The menu shows its own choice; a change of the console's is said.
+                if (!by_menu)
+                    commands += ipc_command({L"script-message", L"app-toast",
+                                             want_hdr ? L"HDR signal: showing HDR" : L"SDR signal: showing SDR",
+                                             L"4000"});
+                if (!mpv.send(plan.ipc_pipe, commands, 500)) {
+                    switch_after = GetTickCount64() + 1000;
+                    continue;
+                }
+                log(L"picture: {} now ({})", want_hdr ? L"HDR" : L"SDR",
+                    by_menu ? L"asked for" : found_hdr ? L"the signal is HDR" : L"the signal is SDR");
+                if (want_hdr) log(L"HDR: {}", hdr_plan_text(hdr_plan(s, plan.display)));
+                shown_hdr = want_hdr;
+                by_menu = false;
             }
             log(L"{} frames sent to mpv", sent);
 
-            const bool mpv_gone = !signal_changed && mpv.exited();
+            const bool mpv_gone = mpv.exited();
             mpv.close_stdin();
             mpv.stop(plan.ipc_pipe, src.raw_input ? 1000 : 2000);
 
@@ -1191,7 +1353,7 @@ int run(const Args &args, bool again, bool &stuck, bool &restart) {
             // out. A card read is ended by flushing the reader (that returns
             // a waiting ReadSample at once; shutting the source down does
             // not while frames flow). The flush runs on its own thread so a
-            // driver that never answers cannot hold Glasir; shutting the
+            // driver that never answers cannot hold the app; shutting the
             // source down is the last try.
             slot.stop();
             HANDLE thread = reader.native_handle();
@@ -1212,7 +1374,7 @@ int run(const Args &args, bool again, bool &stuck, bool &restart) {
             if (WaitForSingleObject(thread, 2000) == WAIT_TIMEOUT) {
                 // The driver will not give the read back. Leave the thread
                 // (it holds what it uses); wWinMain ends the process.
-                log(L"the capture thread did not end; Glasir ends without waiting for it");
+                log(L"the capture thread did not end; " APP_NAME_W L" ends without waiting for it");
                 reader.detach();
                 stuck = true;
             } else {
@@ -1237,17 +1399,16 @@ int run(const Args &args, bool again, bool &stuck, bool &restart) {
             }
         }
     }
-    // The quit event stays set until the next Glasir takes the lock.
+    // The quit event stays set until the next instance takes the lock.
     quit_asked = WaitForSingleObject(quit_event, 0) == WAIT_OBJECT_0;
     log(L"mpv exited (code {})", mpv.exit_code());
     changes.stop();
     keep_changes(changes, settings_path);
-    if (signal_changed && g_found_hdr)
+    if (g_found_hdr && *g_found_hdr != found_before)
         save_settings(settings_path, {{L"video", L"auto_found", *g_found_hdr ? L"hdr" : L"sdr"}});
-    if (quit_asked && (signal_changed || mpv.exit_code() == kRestartCode))
-        log(L"not starting the picture again: another Glasir asked this one to close");
-    restart = (mpv.exit_code() == kRestartCode || signal_changed) && rc == 0 && !quit_asked;
-    if (restart && signal_changed) g_restart_toast = s.hdr ? L"SDR signal: showing SDR" : L"HDR signal: showing HDR";
+    if (quit_asked && mpv.exit_code() == kRestartCode)
+        log(L"not starting the picture again: another " APP_NAME_W L" asked this one to close");
+    restart = mpv.exit_code() == kRestartCode && rc == 0 && !quit_asked;
     return rc;
 }
 
@@ -1259,7 +1420,7 @@ bool launcher_wanted(const Args &args) {
     return s.show_launcher || (GetAsyncKeyState(VK_SHIFT) & 0x8000);
 }
 
-// glasir.log becomes glasir-previous.log; if it cannot be renamed (open in
+// The log becomes the previous log; if it cannot be renamed (open in
 // an editor), it is copied, so the last session is kept either way.
 void keep_previous_log(const std::wstring &log_path, const std::wstring &previous) {
     if (MoveFileExW(log_path.c_str(), previous.c_str(), MOVEFILE_REPLACE_EXISTING)) return;
@@ -1270,77 +1431,6 @@ void keep_previous_log(const std::wstring &log_path, const std::wstring &previou
     DWORD written = 0;
     WriteFile(f, text.data(), DWORD(text.size()), &written, nullptr);
     CloseHandle(f);
-}
-
-// Glasir.exe's arguments, without the program: for starting it again.
-std::vector<std::wstring> own_arguments() {
-    int argc = 0;
-    wchar_t **argv = CommandLineToArgvW(GetCommandLineW(), &argc);
-    std::vector<std::wstring> out;
-    for (int i = 1; i < argc; ++i) out.push_back(argv[i]);
-    LocalFree(argv);
-    return out;
-}
-
-// Set once an update is installed: the new Glasir.exe is started with this
-// command line as the old one ends (wWinMain).
-std::wstring g_start_after;
-
-// Installs a newer Glasir (with the one-instance lock: a Glasir playing
-// closes first). zip: from disk instead of the release's download.
-bool install_glasir(const Args &args, const Release &release, const std::wstring &zip, std::wstring &error) {
-    const std::wstring dir = app_dir();
-    HANDLE quit_event = CreateEventW(nullptr, TRUE, FALSE, kQuitEvent);
-    bool ok = false;
-    {
-        Instance instance(quit_event);
-        if (!instance.take()) {
-            error = L"another Glasir is running and did not close";
-        } else {
-            ok = run_with_progress(
-                L"Glasir update",
-                [&](SetupProgress &progress, const std::atomic<bool> &cancel, std::wstring &e) {
-                    return zip.empty() ? install_update(dir, release, progress, cancel, e)
-                                       : install_update_zip(dir, zip, release.version, progress, cancel, e);
-                },
-                args.dialogs, error);
-        }
-    }
-    CloseHandle(quit_event);
-    if (!ok) log(L"update: not installed: {}", error);
-    return ok;
-}
-
-// --update and --update-from.
-int update_command(const Args &args) {
-    Release release;
-    std::wstring error;
-    int now[3];
-    current_version(now);
-    if (!args.update_from.empty()) {
-        // The version is in the release zip's name: Glasir-x.y.z.zip.
-        const std::wstring name = args.update_from.substr(args.update_from.find_last_of(L"\\/") + 1);
-        const std::wstring stem =
-            name.size() > 11 && name.rfind(L"Glasir-", 0) == 0 ? name.substr(7, name.size() - 11) : L"";
-        if (!parse_version(stem, release.version)) {
-            print(L"--update-from needs a Glasir-x.y.z.zip.\n", args.dialogs);
-            return 2;
-        }
-    } else if (!latest_release(update_repo(), release, error)) {
-        print(L"Could not look for an update: " + sentence(error) + L"\n", args.dialogs);
-        return 1;
-    } else if (!newer(release.version, now)) {
-        print(L"Glasir " + version_text(now) + L" is the newest.\n", args.dialogs);
-        return 0;
-    }
-    if (!install_glasir(args, release, args.update_from, error)) {
-        if (error != L"cancelled")
-            print(L"Glasir could not update: " + sentence(error) + L" The version you have is unchanged.\n",
-                  args.dialogs);
-        return 1;
-    }
-    print(L"Glasir " + version_text(release.version) + L" is installed. Start Glasir again.\n", args.dialogs);
-    return 0;
 }
 
 // A bug report without frames (the launcher's link, --bug-report).
@@ -1359,18 +1449,10 @@ void show_in_explorer(const std::wstring &file) {
 }
 
 // The launcher until Play (true) or the window is closed (false). Its
-// Download/Update buttons run setup, as --setup does, and come back; its
-// update offer installs the newer Glasir, which then starts in its place.
-bool launcher(const Args &args, UpdateCheck &update) {
+// Download/Update buttons run setup, as --setup does, and come back.
+bool launcher(const Args &args) {
     const std::wstring dir = app_dir();
-    {
-        Settings s;
-        std::wstring error;
-        load_settings(settings_file(args), s, error);
-        if (s.update_check) update.start();
-    }
     LauncherExtras extras;
-    extras.update = &update;
     extras.bug_report = [&args](std::wstring &zip, std::wstring &error) {
         return bug_report_now(args, zip, error, L"from the launcher");
     };
@@ -1380,27 +1462,56 @@ bool launcher(const Args &args, UpdateCheck &update) {
             log(L"launcher: {}", action == LauncherAction::Play ? L"play" : L"closed");
             return action == LauncherAction::Play;
         }
-        if (action == LauncherAction::SelfUpdate) {
-            std::wstring error;
-            if (install_glasir(args, update.release(), L"", error)) {
-                g_start_after = join_command_line(dir + L"\\Glasir.exe", own_arguments());
-                return false;
-            }
-            if (error != L"cancelled")
-                show(L"Glasir could not update: " + sentence(error) +
-                         L"\n\nThe version you have is unchanged. logs\\glasir.log has the details.",
-                     MB_ICONERROR);
-            continue;
-        }
         Args setup_args = args;
         setup_args.setup = setup_args.from_launcher = true;
+        if (action == LauncherAction::SetupDlssFg) setup_args.components = L"dlssfg";
+        if (action == LauncherAction::SetupAnr) setup_args.components = L"anr";
+        if (action == LauncherAction::SetupVideo) {
+            // NVIDIA's software: downloaded only once its licences are accepted here.
+            if (!ask_video_licence()) {
+                log(L"launcher: NVIDIA Video Frame Generation's licences were not accepted");
+                continue;
+            }
+            setup_args.components = L"video";
+            setup_args.accept_nvidia = true;
+        }
         HANDLE quit_event = CreateEventW(nullptr, TRUE, FALSE, kQuitEvent);
         {
-            Instance instance(quit_event);  // a Glasir playing closes first: setup replaces its files
+            Instance instance(quit_event);  // an instance playing closes first: setup replaces its files
             if (instance.take()) setup(setup_args, dir, dir + L"\\engine");
         }
         CloseHandle(quit_event);
     }
+}
+
+// --gsync-profile: the NVIDIA driver's G-SYNC settings for the app's mpv.exe.
+// Only "fix" and "restore" change anything, and only for that path.
+int gsync_profile_command(const Args &args) {
+    const std::wstring dir = app_dir(), exe = dir + L"\\engine\\mpv.exe";
+    const std::wstring backup = dir + L"\\nvidia-gsync-backup.txt";
+    std::wstring error;
+    if (args.gsync_profile == L"check") {
+        const NvidiaAppVrr v = read_nvidia_app_vrr(exe);
+        print(nvidia_app_vrr_text(v) + L"\n" +
+                  (!v.read ? L""
+                   : v.windowed() ? L"G-SYNC may engage in " APP_NAME_W L"'s window.\n"
+                                  : L"G-SYNC will not engage in " APP_NAME_W L"'s window. \"" APP_EXE_W L" --gsync-profile fix\" "
+                                    L"allows it for this mpv.exe.\n"),
+              args.dialogs);
+        return v.read ? 0 : 1;
+    }
+    const bool fix = args.gsync_profile == L"fix";
+    if (!(fix ? allow_nvidia_windowed_vrr(exe, backup, error) : restore_nvidia_app_vrr(exe, backup, error))) {
+        print(sentence(error) + L"\n", args.dialogs);
+        return 1;
+    }
+    print((fix ? L"G-SYNC is now allowed in a window for " + exe +
+                     L". It holds from mpv's next start. \"" APP_EXE_W L" --gsync-profile restore\" puts back what was "
+                     L"there.\n"
+               : L"The NVIDIA driver's settings for " + exe + L" are as they were.\n") +
+              nvidia_app_vrr_text(read_nvidia_app_vrr(exe)) + L"\n",
+          args.dialogs);
+    return 0;
 }
 
 }  // namespace
@@ -1414,7 +1525,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         return 2;
     }
     if (args.version) {
-        print(std::format(L"{} {} ({})\n", widen(GLASIR_NAME), widen(GLASIR_VERSION), widen(GLASIR_GIT_DESCRIBE)),
+        print(std::format(L"{} {} ({})\n", widen(APP_NAME), widen(APP_VERSION), widen(APP_GIT_DESCRIBE)),
               args.dialogs);
         return 0;
     }
@@ -1429,27 +1540,28 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     }
     int rc = 0;
     bool stuck = false;
-    UpdateCheck update;  // the launcher's; ends with Glasir, so Play never waits for it
     if (args.list) {
         print(device_list_text(), args.dialogs);
     } else if (args.system) {
         print(system_text(args, true), args.dialogs);
+    } else if (!args.gsync_profile.empty()) {
+        rc = gsync_profile_command(args);
     } else {
         const std::wstring dir = app_dir();
         CreateDirectoryW((dir + L"\\logs").c_str(), nullptr);
         // The last start's log is kept beside this one (for a bug report).
-        const std::wstring log_path = dir + L"\\logs\\glasir.log";
-        keep_previous_log(log_path, dir + L"\\logs\\glasir-previous.log");
+        const std::wstring log_path = dir + L"\\logs\\" APP_ID_W L".log";
+        keep_previous_log(log_path, dir + L"\\logs\\" APP_ID_W L"-previous.log");
         log_open(log_path);
-        log(L"{} {} ({})", widen(GLASIR_NAME), widen(GLASIR_VERSION), widen(GLASIR_GIT_DESCRIBE));
-        finish_update(dir);
+        log(L"{} {} ({})", widen(APP_NAME), widen(APP_VERSION), widen(APP_GIT_DESCRIBE));
+        // A folder from before the app's present name: its settings are taken
+        // along and its old scripts and add-on removed, before the launcher
+        // reads the settings and before mpv could load them.
+        carry_over(dir);
         bool play = true;
-        if (args.update || !args.update_from.empty()) {
-            rc = update_command(args);
-            play = false;
-        } else if (args.bug_report) {
+        if (args.bug_report) {
             std::wstring zip;
-            if (bug_report_now(args, zip, error, L"Glasir.exe --bug-report")) {
+            if (bug_report_now(args, zip, error, APP_EXE_W L" --bug-report")) {
                 if (args.dialogs) show_in_explorer(zip);
                 else print(L"Bug report saved: " + zip + L"\n", false);
             } else {
@@ -1458,7 +1570,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
             }
             play = false;
         } else if (launcher_wanted(args)) {
-            play = launcher(args, update);
+            play = launcher(args);
         }
         if (play)
             for (bool again = false, restart = true; restart && !stuck; again = true) {
@@ -1468,7 +1580,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     }
     if (!g_error.empty()) {
         if (args.dialogs) show(g_error, MB_ICONERROR);
-        else print(L"Glasir: " + g_error + L"\n", false);  // to a console or pipe, if there is one
+        else print(APP_NAME_W L": " + g_error + L"\n", false);  // to a console or pipe, if there is one
     }
     if (stuck) {
         // A driver read that never returned: shutting Media Foundation down
@@ -1479,21 +1591,5 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     MFShutdown();
     CoUninitialize();
     log_close();
-    if (!g_start_after.empty()) {
-        // The updated Glasir, in this one's place (it waits for this one's
-        // lock, and deletes the old Glasir.exe).
-        STARTUPINFOW si{};
-        si.cb = sizeof(si);
-        PROCESS_INFORMATION pi{};
-        std::wstring command = g_start_after;
-        if (CreateProcessW(nullptr, command.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi)) {
-            CloseHandle(pi.hThread);
-            CloseHandle(pi.hProcess);
-        } else if (args.dialogs) {
-            show(std::format(L"Glasir is updated, but could not start again (error {}). Start it yourself.",
-                             GetLastError()),
-                 MB_ICONINFORMATION);
-        }
-    }
     return rc;
 }

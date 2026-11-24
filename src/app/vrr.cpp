@@ -7,12 +7,17 @@
 #include <cfgmgr32.h>
 #include <devpkey.h>
 
+#include <algorithm>
+#include <cstdio>
+#include <cwctype>
 #include <format>
+#include <memory>
 
+#include "app_version.h"
 #include "gpu.h"
 #include "log.h"
 
-namespace glasir {
+namespace app {
 namespace {
 
 // ---------------------------------------------------------------- EDID
@@ -65,7 +70,7 @@ void cta_block(const unsigned char *b, EdidVrr &out) {
 
 // ---------------------------------------------------------------- NVAPI
 //
-// The structures and numbers below are the few Glasir needs from NVIDIA's
+// The structures and numbers below are the few the app needs from NVIDIA's
 // NVAPI SDK (github.com/NVIDIA/nvapi: nvapi.h, nvapi_interface.h,
 // NvApiDriverSettings.h; MIT, Copyright (c) NVIDIA Corporation & Affiliates),
 // written out here so the SDK is not needed to build. nvapi64.dll exports
@@ -171,6 +176,190 @@ int nvidia_vrr_mode(const Nvapi &nv) {
     }
     destroy(session);
     return mode;
+}
+
+// ---- the driver's settings for one program
+#pragma pack(push, 4)
+struct NvDrsProfile {  // NVDRS_PROFILE_V1
+    UINT32 version;
+    UINT16 name[2048];
+    UINT32 gpu_support, is_predefined, apps, settings;
+};
+struct NvDrsApplication {  // NVDRS_APPLICATION_V4
+    UINT32 version, is_predefined;
+    UINT16 name[2048], friendly_name[2048], launcher[2048], file_in_folder[2048];
+    UINT32 flags;
+    UINT16 command_line[2048];
+};
+#pragma pack(pop)
+static_assert(sizeof(NvDrsProfile) == 4116 && sizeof(NvDrsApplication) == 20492);
+
+constexpr UINT32 kNvDrsSaveSettings = 0xFCBC7E14, kNvDrsCreateProfile = 0xCC176068, kNvDrsDeleteProfile = 0x17093206,
+                 kNvDrsProfileInfo = 0x61CD6FD6, kNvDrsFindProfile = 0x7E4A9A0B, kNvDrsCreateApplication = 0x4347A9DE,
+                 kNvDrsFindApplication = 0xEEE566B2, kNvDrsSetSetting = 0x577DD202,
+                 kNvDrsDeleteSetting = 0xE4A26362;
+constexpr UINT32 kNvSettingVrrRequest = 0x1094F1F7;  // VRRREQUESTSTATE_ID: the same three values
+constexpr const wchar_t *kOwnProfile = APP_NAME_W L" (mpv)";
+
+void nv_string(const std::wstring &text, UINT16 (&out)[2048]) {
+    const size_t n = std::min<size_t>(text.size(), 2047);
+    for (size_t i = 0; i < n; ++i) out[i] = UINT16(text[i]);
+    out[n] = 0;
+}
+std::wstring from_nv(const UINT16 (&text)[2048]) {
+    std::wstring out;
+    for (size_t i = 0; i < 2047 && text[i]; ++i) out += wchar_t(text[i]);
+    return out;
+}
+// The same file: the driver keeps names in lower case, with either slash.
+bool same_path(std::wstring a, std::wstring b) {
+    const auto plain = [](std::wstring &s) {
+        for (wchar_t &c : s) c = c == L'/' ? L'\\' : wchar_t(towlower(c));
+    };
+    plain(a);
+    plain(b);
+    return a == b;
+}
+
+// The driver's settings store, loaded; changes stay in it until save().
+class Drs {
+public:
+    explicit Drs(const Nvapi &nv) : nv_(nv) {
+        const auto create = nv.get<int (*)(void **)>(kNvDrsCreateSession);
+        const auto load = nv.get<int (*)(void *)>(kNvDrsLoadSettings);
+        if (!nv.ok() || !create || !load || create(&session_) != 0) return;
+        ok_ = load(session_) == 0;
+    }
+    Drs(const Drs &) = delete;
+    Drs &operator=(const Drs &) = delete;
+    ~Drs() {
+        const auto destroy = nv_.get<int (*)(void *)>(kNvDrsDestroySession);
+        if (session_ && destroy) destroy(session_);
+    }
+    bool ok() const { return ok_; }
+
+    // The profile that applies to the program, null when none names it.
+    void *find(const std::wstring &exe, NvDrsApplication &app) const {
+        const auto f = nv_.get<int (*)(void *, UINT16 *, void **, NvDrsApplication *)>(kNvDrsFindApplication);
+        UINT16 name[2048];
+        nv_string(exe, name);
+        app = {};
+        app.version = nv_version(app, 4);
+        void *profile = nullptr;
+        return f && f(session_, name, &profile, &app) == 0 ? profile : nullptr;
+    }
+    void *find_profile(const std::wstring &profile_name) const {
+        const auto f = nv_.get<int (*)(void *, UINT16 *, void **)>(kNvDrsFindProfile);
+        UINT16 name[2048];
+        nv_string(profile_name, name);
+        void *profile = nullptr;
+        return f && f(session_, name, &profile) == 0 ? profile : nullptr;
+    }
+    bool info(void *profile, NvDrsProfile &p) const {
+        const auto f = nv_.get<int (*)(void *, void *, NvDrsProfile *)>(kNvDrsProfileInfo);
+        p = {};
+        p.version = nv_version(p, 1);
+        return f && f(session_, profile, &p) == 0;
+    }
+    // A new profile holding this program alone; the driver's error number
+    // in `status` when it refuses.
+    void *create(const std::wstring &profile_name, const std::wstring &exe, int &status) const {
+        const auto make = nv_.get<int (*)(void *, NvDrsProfile *, void **)>(kNvDrsCreateProfile);
+        const auto add = nv_.get<int (*)(void *, void *, NvDrsApplication *)>(kNvDrsCreateApplication);
+        status = -1;
+        if (!make || !add) return nullptr;
+        void *profile = find_profile(profile_name);
+        if (!profile) {
+            NvDrsProfile p{};
+            p.version = nv_version(p, 1);
+            nv_string(profile_name, p.name);
+            if ((status = make(session_, &p, &profile)) != 0) return nullptr;
+        }
+        const auto app = std::make_unique<NvDrsApplication>();
+        app->version = nv_version(*app, 4);
+        nv_string(exe, app->name);
+        nv_string(L"mpv (" APP_NAME_W L")", app->friendly_name);
+        status = add(session_, profile, app.get());
+        return status == 0 ? profile : nullptr;
+    }
+    // The global settings, which a program without a profile gets.
+    void *base() const {
+        const auto f = nv_.get<int (*)(void *, void **)>(kNvDrsBaseProfile);
+        void *profile = nullptr;
+        return f && f(session_, &profile) == 0 ? profile : nullptr;
+    }
+    bool remove(void *profile) const {
+        const auto f = nv_.get<int (*)(void *, void *)>(kNvDrsDeleteProfile);
+        return f && f(session_, profile) == 0;
+    }
+
+    // A setting as it is in effect for the profile, -1 when it cannot be
+    // read; own: set in this profile, not inherited.
+    int get(void *profile, UINT32 id, bool &own) const {
+        const auto f = nv_.get<int (*)(void *, void *, UINT32, NvDrsSetting *)>(kNvDrsGetSetting);
+        const auto s = std::make_unique<NvDrsSetting>();
+        s->version = nv_version(*s, 1);
+        own = false;
+        if (!f || f(session_, profile, id, s.get()) != 0 || s->current.u32 > 2) return -1;
+        own = s->location == 0;  // NVDRS_CURRENT_PROFILE_LOCATION
+        return int(s->current.u32);
+    }
+    bool set(void *profile, UINT32 id, UINT32 value) const {
+        const auto f = nv_.get<int (*)(void *, void *, NvDrsSetting *)>(kNvDrsSetSetting);
+        const auto s = std::make_unique<NvDrsSetting>();
+        s->version = nv_version(*s, 1);
+        s->id = id;
+        s->type = 0;  // NVDRS_DWORD_TYPE
+        s->current.u32 = value;
+        return f && f(session_, profile, s.get()) == 0;
+    }
+    // Back to what the profile inherits.
+    bool erase(void *profile, UINT32 id) const {
+        const auto f = nv_.get<int (*)(void *, void *, UINT32)>(kNvDrsDeleteSetting);
+        return f && f(session_, profile, id) == 0;
+    }
+    bool save() const {
+        const auto f = nv_.get<int (*)(void *)>(kNvDrsSaveSettings);
+        return f && f(session_) == 0;
+    }
+
+private:
+    const Nvapi &nv_;
+    void *session_ = nullptr;
+    bool ok_ = false;
+};
+
+// The launcher's survey thread and the main thread may both ask.
+SRWLOCK g_nvapi_lock = SRWLOCK_INIT;
+struct NvapiLock {
+    NvapiLock() { AcquireSRWLockExclusive(&g_nvapi_lock); }
+    ~NvapiLock() { ReleaseSRWLockExclusive(&g_nvapi_lock); }
+};
+
+NvidiaAppVrr app_vrr(const Drs &drs, const std::wstring &exe) {
+    NvidiaAppVrr out;
+    if (!drs.ok()) return out;
+    out.read = true;
+    const auto app = std::make_unique<NvDrsApplication>();
+    void *profile = drs.find(exe, *app);
+    if (profile) {
+        out.has_profile = true;
+        out.own_path = same_path(from_nv(app->name), exe);
+        NvDrsProfile p;
+        if (drs.info(profile, p)) out.profile = from_nv(p.name);
+    } else {
+        // No profile of its own: the global settings are what it gets.
+        profile = drs.base();
+    }
+    if (!profile) return out;
+    out.mode = drs.get(profile, kNvSettingVrrMode, out.mode_own);
+    out.requested = drs.get(profile, kNvSettingVrrRequest, out.requested_own);
+    if (!out.has_profile) out.mode_own = out.requested_own = false;
+    return out;
+}
+
+const wchar_t *vrr_mode_text(int mode) {
+    return mode == 0 ? L"off" : mode == 1 ? L"full screen only" : mode == 2 ? L"windowed and full screen" : L"unknown";
 }
 
 std::wstring hz(double v) { return std::format(L"{:.0f}", v); }
@@ -290,9 +479,8 @@ std::vector<unsigned char> read_edid(const std::wstring &path) {
 
 NvidiaVrr read_nvidia_vrr(const std::wstring &device) {
     NvidiaVrr out;
-    static SRWLOCK lock = SRWLOCK_INIT;  // the launcher's survey thread and the main thread may both ask
-    AcquireSRWLockExclusive(&lock);
     {
+        const NvapiLock lock;
         Nvapi nv;
         const auto id_by_name = nv.get<int (*)(const char *, UINT32 *)>(kNvDisplayIdByName);
         const auto capabilities = nv.get<int (*)(UINT32, NvMonitorCapabilities *)>(kNvMonitorCapabilities);
@@ -318,8 +506,149 @@ NvidiaVrr read_nvidia_vrr(const std::wstring &device) {
             }
         }
     }
-    ReleaseSRWLockExclusive(&lock);
     return out;
+}
+
+NvidiaAppVrr read_nvidia_app_vrr(const std::wstring &exe) {
+    const NvapiLock lock;
+    const Nvapi nv;
+    const Drs drs(nv);
+    return app_vrr(drs, exe);
+}
+
+std::wstring nvidia_app_vrr_text(const NvidiaAppVrr &v) {
+    if (!v.read) return L"NVIDIA driver: its program settings could not be read.";
+    const std::wstring where = !v.has_profile ? L"no program profile (the global settings apply)"
+                                              : L"profile \"" + v.profile + L"\"" +
+                                                    (v.own_path ? L"" : L" (for every program of this name)");
+    return L"NVIDIA driver, G-SYNC for mpv.exe: " + std::wstring(vrr_mode_text(v.mode)) +
+           (v.requested != v.mode ? std::wstring(L", requested ") + vrr_mode_text(v.requested) : L"") + L"; " + where +
+           L".";
+}
+
+namespace {
+
+// The backup: what the two settings were in the program's own profile
+// (-1: not set there), and whether the app made the profile.
+struct ProfileBackup {
+    std::wstring exe;
+    int created = 0, mode = -1, requested = -1;
+};
+bool read_backup(const std::wstring &file, ProfileBackup &b) {
+    FILE *f = nullptr;
+    if (_wfopen_s(&f, file.c_str(), L"rt, ccs=UTF-8") != 0) f = nullptr;
+    if (!f) return false;
+    wchar_t line[4096];
+    int seen = 0;
+    while (fgetws(line, 4096, f)) {
+        std::wstring l = line;
+        while (!l.empty() && (l.back() == L'\n' || l.back() == L'\r')) l.pop_back();
+        const size_t eq = l.find(L'=');
+        if (eq == std::wstring::npos) continue;
+        const std::wstring key = l.substr(0, eq), value = l.substr(eq + 1);
+        if (key == L"exe") b.exe = value, ++seen;
+        else if (key == L"created") b.created = _wtoi(value.c_str()), ++seen;
+        else if (key == L"mode") b.mode = _wtoi(value.c_str()), ++seen;
+        else if (key == L"requested") b.requested = _wtoi(value.c_str()), ++seen;
+    }
+    fclose(f);
+    return seen == 4 && b.mode >= -1 && b.mode <= 2 && b.requested >= -1 && b.requested <= 2;
+}
+bool write_backup(const std::wstring &file, const ProfileBackup &b) {
+    FILE *f = nullptr;
+    if (_wfopen_s(&f, file.c_str(), L"wt, ccs=UTF-8") != 0) f = nullptr;
+    if (!f) return false;
+    const bool ok = fwprintf(f, L"exe=%ls\ncreated=%d\nmode=%d\nrequested=%d\n", b.exe.c_str(), b.created, b.mode,
+                             b.requested) > 0;
+    return fclose(f) == 0 && ok;
+}
+
+}  // namespace
+
+bool allow_nvidia_windowed_vrr(const std::wstring &exe, const std::wstring &backup_file, std::wstring &error) {
+    const NvapiLock lock;
+    const Nvapi nv;
+    ProfileBackup backup;
+    backup.exe = exe;
+    {
+        const Drs drs(nv);
+        if (!drs.ok()) return error = L"The NVIDIA driver did not answer (no NVIDIA GPU, or no driver)", false;
+        const auto app = std::make_unique<NvDrsApplication>();
+        void *profile = drs.find(exe, *app);
+        std::wstring shared;  // a profile that names every mpv.exe
+        if (profile && !same_path(from_nv(app->name), exe)) {
+            NvDrsProfile p;
+            if (drs.info(profile, p)) shared = from_nv(p.name);
+            profile = nullptr;
+        }
+        if (!profile) {
+            int status = 0;
+            profile = drs.create(kOwnProfile, exe, status);
+            if (!profile) {
+                error = shared.empty()
+                            ? std::format(L"The NVIDIA driver did not take a profile for {} (error {})", exe, status)
+                            : std::format(L"The NVIDIA driver's profile \"{}\" covers every mpv.exe and it took none "
+                                          L"for this one alone (error {}). Set \"GSYNC - Application Mode\" and "
+                                          L"\"GSYNC - Global Mode\" to \"Fullscreen and Windowed\" in that profile "
+                                          L"with NVIDIA Profile Inspector",
+                                          shared, status);
+                return false;
+            }
+            backup.created = 1;
+        } else {
+            bool own = false;
+            const int mode = drs.get(profile, kNvSettingVrrMode, own);
+            backup.mode = own ? mode : -1;
+            const int requested = drs.get(profile, kNvSettingVrrRequest, own);
+            backup.requested = own ? requested : -1;
+        }
+        // The first state is the one to go back to: a second fix keeps it.
+        ProfileBackup before;
+        if (!(read_backup(backup_file, before) && same_path(before.exe, exe)) && !write_backup(backup_file, backup))
+            return error = L"Could not write " + backup_file + L"; nothing was changed", false;
+        if (!drs.set(profile, kNvSettingVrrMode, 2) || !drs.set(profile, kNvSettingVrrRequest, 2) || !drs.save())
+            return error = L"The NVIDIA driver did not save the settings (it may need " APP_NAME_W L" run as administrator "
+                           L"once for this)",
+                   false;
+    }
+    // Read back with the store loaded anew.
+    const Drs check(nv);
+    const NvidiaAppVrr now = app_vrr(check, exe);
+    if (!now.windowed() || !now.own_path)
+        return error = L"The NVIDIA driver saved the settings, but reads them back as: " + nvidia_app_vrr_text(now),
+               false;
+    return true;
+}
+
+bool restore_nvidia_app_vrr(const std::wstring &exe, const std::wstring &backup_file, std::wstring &error) {
+    ProfileBackup backup;
+    if (!read_backup(backup_file, backup) || !same_path(backup.exe, exe))
+        return error = L"There is nothing to put back: " APP_NAME_W L" has not changed the NVIDIA driver's settings for " + exe,
+               false;
+    const NvapiLock lock;
+    const Nvapi nv;
+    const Drs drs(nv);
+    if (!drs.ok()) return error = L"The NVIDIA driver did not answer", false;
+    const auto app = std::make_unique<NvDrsApplication>();
+    void *profile = drs.find(exe, *app);
+    // No profile for the path any more: someone removed it, nothing to undo.
+    if (profile && same_path(from_nv(app->name), exe)) {
+        NvDrsProfile p;
+        const bool known = drs.info(profile, p);
+        bool ok = true;
+        if (backup.created && known && from_nv(p.name) == kOwnProfile && p.apps <= 1 && p.settings <= 2) {
+            ok = drs.remove(profile);  // the app's, with nothing added since
+        } else {
+            ok = (backup.mode < 0 ? drs.erase(profile, kNvSettingVrrMode)
+                                  : drs.set(profile, kNvSettingVrrMode, UINT32(backup.mode))) &&
+                 (backup.requested < 0 ? drs.erase(profile, kNvSettingVrrRequest)
+                                       : drs.set(profile, kNvSettingVrrRequest, UINT32(backup.requested)));
+        }
+        if (!ok || !drs.save())
+            return error = L"The NVIDIA driver did not save the settings; the backup is kept in " + backup_file, false;
+    }
+    DeleteFileW(backup_file.c_str());
+    return true;
 }
 
 void read_vrr(DisplayInfo &d, const std::wstring &monitor_device_path, bool hdmi) {
@@ -330,4 +659,4 @@ void read_vrr(DisplayInfo &d, const std::wstring &monitor_device_path, bool hdmi
     apply_vrr(d, edid.valid ? &edid : nullptr, nvidia.read ? &nvidia : nullptr, hdmi);
 }
 
-}  // namespace glasir
+}  // namespace app

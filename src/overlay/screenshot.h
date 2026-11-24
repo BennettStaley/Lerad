@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
-// Glasir's screenshot (the s key): the picture as it reaches the screen,
+// The app's screenshot (the s key): the picture as it reaches the screen,
 // after scaling and DLSS 5, without the menu or toasts and without the black
-// bars, in Glasir's Screenshots folder.
+// bars, in the app's Screenshots folder.
 //
 // The frame is taken at mpv's present, before frame generation draws the
 // frame in between into the same back buffer, so it is always a real frame.
@@ -20,8 +20,9 @@
 #include <vector>
 
 #include "compositor.h"  // Encoding
+#include "tone_map.h"
 
-namespace glasir::overlay::shot {
+namespace app::overlay::shot {
 
 // A picture read back from the GPU: 4 bytes a pixel (8 for
 // R16G16B16A16_FLOAT), rows tightly packed.
@@ -38,19 +39,14 @@ bool supported(DXGI_FORMAT format);
 // Whether this frame is HDR: PQ in 10 bits, or scRGB (half floats).
 bool is_hdr(const Frame &frame);
 
-// The reference (paper) white HDR is tone-mapped from: BT.2408's 203 nits,
-// which HDR games are made around. (Not the menu's white, which follows
-// Windows' SDR brightness: the menu is not in the screenshot.)
-constexpr float kReferenceWhiteNits = 203.0f;
+// The reference (paper) white HDR is tone-mapped from (tone_map.h).
+constexpr float kReferenceWhiteNits = tone::kReferenceWhiteNits;
 
 // Linear BT.709 light in scRGB units (1.0 = 80 nits) of one pixel of an
 // HDR frame; values outside BT.709 stay as they are (negative, or above).
 void scrgb(const Frame &frame, size_t pixel, float rgb[3]);
 
-// SDR sRGB (0-255, B G R order) of HDR light in scRGB units: the colours
-// outside BT.709 brought in toward grey, then everything above
-// reference_white_nits * knee rolled off smoothly to the SDR white, on the
-// brightest channel so that hues and saturation stay.
+// SDR sRGB (0-255, B G R order) of HDR light in scRGB units (tone::to_sdr).
 void tone_map(const float scrgb[3], float reference_white_nits, BYTE bgr[3]);
 
 // Writes stem.png (and stem.jxr for HDR) into folder. files: the names
@@ -83,4 +79,4 @@ private:
     int tries_ = 0;
 };
 
-}  // namespace glasir::overlay::shot
+}  // namespace app::overlay::shot

@@ -7,7 +7,7 @@
 #include <mutex>
 #include <share.h>
 
-namespace glasir {
+namespace app {
 namespace {
 std::mutex g_mutex;
 FILE *g_file = nullptr;
@@ -53,4 +53,4 @@ std::string narrow(std::wstring_view text) {
     return out;
 }
 
-}  // namespace glasir
+}  // namespace app

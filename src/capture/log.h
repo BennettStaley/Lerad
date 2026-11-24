@@ -7,7 +7,7 @@
 #include <string_view>
 #include <utility>
 
-namespace glasir {
+namespace app {
 
 // Starts a new log at path (truncating it). Until then, and if it fails,
 // lines go to stderr.
@@ -26,4 +26,4 @@ std::string narrow(std::wstring_view text);  // to UTF-8
 // "0x80004005"
 inline std::wstring hresult_text(long hr) { return std::format(L"0x{:08X}", static_cast<unsigned long>(hr)); }
 
-}  // namespace glasir
+}  // namespace app

@@ -1,17 +1,17 @@
 # SPDX-License-Identifier: MIT
-"""Checks what Glasir does with an HDR capture, end to end, without a card.
+"""Checks what the app does with an HDR capture, end to end, without a card.
 
 Writes a 10-bit HDR10 test picture (P010: grey bars at 0, 50, 100, 203, 400,
-1000, 4000 and 10000 nits) to Glasir.exe --input-raw, the path a card's frames
-take, and reads back over Glasir's IPC pipe what mpv really puts out
+1000, 4000 and 10000 nits) to the exe's --input-raw, the path a card's frames
+take, and reads back over the app's IPC pipe what mpv really puts out
 (video-target-params), not what its options ask for. With the Python package
-imagecodecs it also presses s and measures the bars in Glasir's HDR
+imagecodecs it also presses s and measures the bars in the app's HDR
 screenshot (.jxr: the back buffer as it goes to the screen), in nits; with Pillow, the
 bars of an SDR picture too, as 8-bit values.
 
-Each case is one start of Glasir in a 1280x720 window for a few seconds:
+Each case is one start of the app in a 1280x720 window for a few seconds:
 
-    auto     glasir.ini's defaults: HDR10 as the console sends it when Windows
+    auto     the settings file's defaults: HDR10 as the console sends it when Windows
              has HDR on for the screen (the bars come out at their own nits),
              else tone mapped to SDR
     fit      [hdr] fit_to_screen = 1 with display_peak_nits = 600: HDR10, no
@@ -21,13 +21,18 @@ Each case is one start of Glasir in a 1280x720 window for a few seconds:
              screens only)
     sdr      [hdr] output = sdr: an SDR swap chain, tone mapped
     capture  an SDR capture (NV12): an SDR swap chain
+    live     a 10-bit capture shown as SDR that goes to HDR and back while
+             playing (what the menu's Signal sends; tools/picture_check.py
+             has the console's signal changing): HDR is treated as after a
+             start in HDR, SDR as after a start in SDR; then the same with
+             fitting to 600 nits (HDR screens only)
 
     python tools/hdr_check.py                 # every case
     python tools/hdr_check.py --case auto --case sdr
     python tools/hdr_check.py --keep          # keep the screenshots
 
 Needs numpy. No ffmpeg. Screenshots it makes are removed from
-out\\Glasir\\Screenshots unless --keep.
+the app folder's Screenshots unless --keep.
 """
 import argparse
 import json
@@ -39,6 +44,8 @@ import time
 
 import numpy as np
 
+from app_name import NAME, EXE, LOG, PIPE, APP_DIR
+
 try:
     import imagecodecs  # reads the .jxr screenshot
 except ImportError:
@@ -48,10 +55,9 @@ try:
 except ImportError:
     Image = None
 
-PIPE = r'\\.\pipe\glasir'
 W, H, FPS = 1280, 720, 60
 BARS = [0, 50, 100, 203, 400, 1000, 4000, 10000]  # nits
-SOURCE_PEAK = 1000  # glasir.ini's video.hdr_peak_nits here: the frames' metadata
+SOURCE_PEAK = 1000  # the settings file's video.hdr_peak_nits here: the frames' metadata
 
 
 def pq(nits):
@@ -70,6 +76,18 @@ def p010_frame(step):
         y[:, i * bar:(i + 1) * bar] = int(round(64 + 876 * float(pq(nits))))
     x = (step * 16) % (W - 64)
     y[H - 40:H - 16, x:x + 64] = int(round(64 + 876 * float(pq(100))))
+    uv = np.full((H // 2, W), 512, np.uint16)
+    return (y << 6).astype('<u2').tobytes() + (uv << 6).astype('<u2').tobytes()
+
+
+def sdr_p010_frame(step):
+    """The grey steps of nv12_frame in 10 bits: an SDR signal in a 10-bit capture."""
+    y = np.zeros((H, W), np.uint16)
+    bar = W // len(BARS)
+    for i in range(len(BARS)):
+        y[:, i * bar:(i + 1) * bar] = 64 + round(876 * i / (len(BARS) - 1))
+    x = (step * 16) % (W - 64)
+    y[H - 40:H - 16, x:x + 64] = 512
     uv = np.full((H // 2, W), 512, np.uint16)
     return (y << 6).astype('<u2').tobytes() + (uv << 6).astype('<u2').tobytes()
 
@@ -120,7 +138,7 @@ def describe(t):
 
 
 def bar_nits(path):
-    """The bars' brightness in a Glasir HDR screenshot (scRGB, 1.0 = 80 nits)."""
+    """The bars' brightness in one of the app's HDR screenshots (scRGB, 1.0 = 80 nits)."""
     with open(path, 'rb') as f:
         image = np.asarray(imagecodecs.jpegxr_decode(f.read()), dtype=np.float64)
     h, w = image.shape[:2]
@@ -151,38 +169,59 @@ def measure_sdr(files):
 
 
 class Run:
-    """Glasir playing the test picture until close()."""
+    """The app playing the test picture until close()."""
 
-    def __init__(self, app, sdr_capture, settings):
+    def __init__(self, app, sdr_capture, settings, frame=None):
+        """frame: the picture to start with instead of the capture's own
+        (show() changes it while playing)."""
         self.app = app
-        args = [os.path.join(app, 'Glasir.exe'), '--no-dialogs', '--input-raw', '-', '--raw-format',
+        args = [os.path.join(app, EXE), '--no-dialogs', '--input-raw', '-', '--raw-format',
                 'nv12' if sdr_capture else 'p010', '--set', f'capture.width={W}', '--set', f'capture.height={H}',
                 '--set', f'capture.fps={FPS}', '--set', 'window.mode=windowed', '--set', 'dlss5.enabled=off',
                 '--set', f'video.mode={"sdr" if sdr_capture else "hdr"}',
                 '--set', f'video.hdr_peak_nits={SOURCE_PEAK}', '--set', 'video.scaling=mpv',
-                # Whatever glasir.ini has, each case starts from the defaults.
+                # Whatever the settings file has, each case starts from the defaults.
                 '--set', 'hdr.output=auto', '--set', 'hdr.fit_to_screen=0', '--set', 'hdr.display_peak_nits=0',
                 '--set', 'hdr.tone_mapping=auto', '--set', 'hdr.dynamic_peak=0']
         for s in settings:
             args += ['--set', s]
-        self.glasir = subprocess.Popen(args, stdin=subprocess.PIPE)
+        self.process = subprocess.Popen(args, stdin=subprocess.PIPE)
         self.stop = threading.Event()
-        frames = [(nv12_frame if sdr_capture else p010_frame)(i) for i in range(8)]
+        self.show(frame or (nv12_frame if sdr_capture else p010_frame))
 
         def feed():
             n, due = 0, time.perf_counter()
             try:
                 while not self.stop.is_set():
-                    self.glasir.stdin.write(frames[(n // 2) % len(frames)])
+                    frames = self.frames
+                    self.process.stdin.write(frames[(n // 2) % len(frames)])
                     n += 1
                     due += 1 / FPS
                     time.sleep(max(due - time.perf_counter(), 0))
             except OSError:
-                pass  # Glasir closed
+                pass  # the app closed
 
         threading.Thread(target=feed, daemon=True).start()
         self.mpv = Mpv(20)
         time.sleep(3)  # past mpv's start
+
+    def show(self, frame):
+        """The picture fed from now on: p010_frame, sdr_p010_frame or nv12_frame."""
+        self.frames = [frame(i) for i in range(8)]
+
+    def until_shown(self, hdr, out_hdr, timeout=40):
+        """Waits until mpv shows the frames as HDR10 (hdr) or SDR, and puts
+        out HDR10 (out_hdr) or SDR. ReShade compiles its effects on the first
+        change at a size, which stops the picture for some seconds. The
+        seconds it took, or None."""
+        began = time.time()
+        while time.time() - began < timeout:
+            tags = (self.mpv('get_property', 'video-out-params') or {}).get('gamma')
+            out = self.mpv.target().get('gamma')
+            if tags and out and (tags == 'pq') == hdr and (out == 'pq') == out_hdr:
+                return time.time() - began
+            time.sleep(0.05)
+        return None
 
     def screenshot(self):
         """Presses s; the new files in Screenshots, once they are written."""
@@ -206,16 +245,16 @@ class Run:
             pass  # mpv may close the pipe before answering
         self.stop.set()
         try:
-            self.glasir.wait(15)
+            self.process.wait(15)
         except subprocess.TimeoutExpired:
-            self.glasir.kill()
-        return self.glasir.returncode
+            self.process.kill()
+        return self.process.returncode
 
     def log_line(self, key):
-        """The last line of Glasir's log with this in it."""
+        """The last line of the app's log with this in it."""
         found = ''
         try:
-            with open(os.path.join(self.app, 'logs', 'glasir.log'), encoding='utf-8-sig', errors='replace') as f:
+            with open(os.path.join(self.app, 'logs', LOG), encoding='utf-8-sig', errors='replace') as f:
                 for line in f:
                     if key in line:
                         found = line.rstrip()
@@ -251,7 +290,7 @@ def case_auto(a, made):
         plan = run.log_line('] HDR: ') or run.log_line('HDR: ')
         said = plan.split('HDR: ', 1)[-1]
         t = run.mpv.target()
-        print(f'  Glasir: {said}\n  mpv puts out: {describe(t)}')
+        print(f'  {NAME}: {said}\n  mpv puts out: {describe(t)}')
         if 'HDR10 to the screen' in said:
             ok &= check(t.get('gamma') == 'pq' and t.get('primaries') == 'bt.2020', 'HDR10 (BT.2020, PQ) to the screen')
             ok &= check(abs((t.get('max-luma') or 0) - SOURCE_PEAK) < 1,
@@ -271,7 +310,7 @@ def case_auto(a, made):
             _, files = measure(run, a.keep, made)
             ok &= check(not any(f.endswith('.jxr') for f in files), 'the screenshot is an SDR one (.png only)')
     finally:
-        ok &= check(run.close() == 0, 'Glasir closed cleanly')
+        ok &= check(run.close() == 0, f'{NAME} closed cleanly')
     return ok, 'HDR10 to the screen' in said
 
 
@@ -280,7 +319,7 @@ def case_fit(a, made):
     ok = True
     try:
         t = run.mpv.target()
-        print(f"  Glasir: {run.log_line('HDR: ').split('HDR: ', 1)[-1]}\n  mpv puts out: {describe(t)}")
+        print(f"  {NAME}: {run.log_line('HDR: ').split('HDR: ', 1)[-1]}\n  mpv puts out: {describe(t)}")
         ok &= check(t.get('gamma') == 'pq' and abs((t.get('max-luma') or 0) - 600) < 1, 'HDR10, peak 600 nits')
         nits, _ = measure(run, a.keep, made)
         if nits:
@@ -290,7 +329,7 @@ def case_fit(a, made):
                         'the 100 and 203 nit bars stay as they are: only the highlights change')
             ok &= check(all(b >= x - 0.5 for x, b in zip(nits, nits[1:])), 'brighter bars are never darker')
     finally:
-        ok &= check(run.close() == 0, 'Glasir closed cleanly')
+        ok &= check(run.close() == 0, f'{NAME} closed cleanly')
     return ok
 
 
@@ -328,7 +367,7 @@ def case_menu(a, made):
             ok &= check(all(abs(n - b) <= max(2.0, b * 0.03) for b, n in zip(BARS, nits)),
                         'every bar at its own brightness again')
     finally:
-        ok &= check(run.close() == 0, 'Glasir closed cleanly')
+        ok &= check(run.close() == 0, f'{NAME} closed cleanly')
     return ok
 
 
@@ -337,7 +376,7 @@ def case_sdr(a, made):
     ok = True
     try:
         t = run.mpv.target()
-        print(f"  Glasir: {run.log_line('HDR: ').split('HDR: ', 1)[-1]}\n  mpv puts out: {describe(t)}")
+        print(f"  {NAME}: {run.log_line('HDR: ').split('HDR: ', 1)[-1]}\n  mpv puts out: {describe(t)}")
         ok &= check(t.get('gamma') != 'pq' and t.get('primaries') == 'bt.709', 'an SDR picture (BT.709), tone mapped')
         ok &= check(run.mpv('get_property', 'd3d11-output-csp') == 'srgb' and
                     run.mpv('get_property', 'target-colorspace-hint') is False, 'an SDR swap chain is asked for')
@@ -349,7 +388,7 @@ def case_sdr(a, made):
                         codes[5] > codes[3] + 20,
                         'black is black, the bars rise, and 1000 nits is well above 203')
     finally:
-        ok &= check(run.close() == 0, 'Glasir closed cleanly')
+        ok &= check(run.close() == 0, f'{NAME} closed cleanly')
     return ok
 
 
@@ -370,18 +409,103 @@ def case_capture(a, made):
             ok &= check(all(abs(c - w) <= 2 for c, w in zip(codes, want)),
                         'the grey steps reach the screen as they are (no tone mapping, no brightness change)')
     finally:
-        ok &= check(run.close() == 0, 'Glasir closed cleanly')
+        ok &= check(run.close() == 0, f'{NAME} closed cleanly')
+    return ok
+
+
+def sdr_as_started(run, a, made, what):
+    """An SDR picture in an SDR swap chain, the grey steps untouched: what a
+    start with an SDR capture gives (case_capture)."""
+    t = run.mpv.target()
+    print(f'  {what}: {describe(t)}')
+    ok = check(t.get('gamma') != 'pq' and t.get('primaries') == 'bt.709', f'{what}: SDR (BT.709) to the screen')
+    ok &= check(run.mpv('get_property', 'target-colorspace-hint') is False and
+                run.mpv('get_property', 'target-peak') == 'auto',
+                'an SDR swap chain is asked for, and no peak: as after a start in SDR')
+    _, files = measure(run, a.keep, made)
+    ok &= check(len(files) == 1 and files[0].endswith('.png'), 'the screenshot is an SDR one (.png only)')
+    codes = measure_sdr(files)
+    if codes:
+        want = [255 * i / (len(BARS) - 1) for i in range(len(BARS))]
+        ok &= check(all(abs(c - w) <= 2 for c, w in zip(codes, want)),
+                    'the grey steps reach the screen as they are (no tone mapping, no brightness change)')
+    return ok
+
+
+def live_once(a, made, hdr_screen, fit):
+    """A 10-bit capture started as SDR, switched to HDR and back as the menu's Signal does."""
+    settings = ['video.mode=sdr'] + (['hdr.fit_to_screen=1', 'hdr.display_peak_nits=600', 'hdr.output=hdr'] if fit else [])
+    run = Run(a.app, False, settings, sdr_p010_frame)
+    ok = True
+    try:
+        mpv = run.mpv
+        pid = mpv('get_property', 'pid')
+        ok &= sdr_as_started(run, a, made, 'started as SDR')
+
+        run.show(p010_frame)
+        mpv('script-message', 'app-picture', 'hdr')
+        took = run.until_shown(True, hdr_screen)
+        ok &= check(took is not None, 'HDR while playing' + ('' if took is None else f', {took:.2f} s after it was asked for'))
+        time.sleep(1.0)
+        t = mpv.target()
+        print(f"  {NAME}: {run.log_line('HDR: ').split('HDR: ', 1)[-1]}\n  mpv puts out: {describe(t)}")
+        nits, files = None, []
+        if not hdr_screen:
+            ok &= check(t.get('gamma') != 'pq' and t.get('primaries') == 'bt.709' and
+                        mpv('get_property', 'target-colorspace-hint') is False,
+                        'tone mapped into the SDR swap chain, as a start in HDR is on this screen')
+        elif fit:
+            ok &= check(t.get('gamma') == 'pq' and abs((t.get('max-luma') or 0) - 600) < 1 and
+                        mpv('get_property', 'target-colorspace-hint-mode') == 'target',
+                        'HDR10 fitted to 600 nits, as a start in HDR with fit_to_screen = 1')
+            nits, files = measure(run, a.keep, made)
+            if nits:
+                ok &= check(max(nits) <= 600 * 1.03, 'no bar brighter than 600 nits')
+        else:
+            ok &= check(t.get('gamma') == 'pq' and t.get('primaries') == 'bt.2020' and
+                        abs((t.get('max-luma') or 0) - SOURCE_PEAK) < 1,
+                        f"HDR10 with the capture's own peak ({SOURCE_PEAK} nits): nothing is tone mapped")
+            ok &= check(mpv('get_property', 'target-colorspace-hint-mode') == 'source' and
+                        mpv('get_property', 'target-peak') == 'auto' and
+                        mpv('get_property', 'hdr-compute-peak') is False,
+                        "mpv's options: source metadata, no target peak, no peak measuring, as a start in HDR")
+            nits, files = measure(run, a.keep, made)
+            if nits:
+                ok &= check(all(abs(n - b) <= max(2.0, b * 0.03) for b, n in zip(BARS, nits)),
+                            'every bar leaves at its own brightness (within 3 %)')
+        if hdr_screen:
+            ok &= check(any(f.endswith('.jxr') for f in files), 'the screenshot is an HDR one (.jxr and .png)')
+
+        run.show(sdr_p010_frame)
+        mpv('script-message', 'app-picture', 'sdr')
+        took = run.until_shown(False, False)
+        ok &= check(took is not None, 'SDR again while playing' + ('' if took is None else f', after {took:.2f} s'))
+        time.sleep(1.0)
+        ok &= sdr_as_started(run, a, made, 'back to SDR')
+        ok &= check(mpv('get_property', 'pid') == pid and not run.log_line('starting the picture again'),
+                    'the same mpv throughout: the picture never started again')
+    finally:
+        ok &= check(run.close() == 0, f'{NAME} closed cleanly')
+    return ok
+
+
+def case_live(a, made, hdr_screen):
+    ok = live_once(a, made, hdr_screen, False)
+    if hdr_screen:
+        time.sleep(1.0)  # the last instance lets go of its lock
+        print('live, fitted:')
+        ok &= live_once(a, made, hdr_screen, True)
     return ok
 
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument('--app', default=os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'out', 'Glasir'))
-    p.add_argument('--case', action='append', choices=['auto', 'fit', 'menu', 'sdr', 'capture'])
+    p.add_argument('--app', default=APP_DIR)
+    p.add_argument('--case', action='append', choices=['auto', 'fit', 'menu', 'sdr', 'capture', 'live'])
     p.add_argument('--keep', action='store_true', help='keep the screenshots')
     a = p.parse_args()
-    cases = a.case or ['auto', 'fit', 'menu', 'sdr', 'capture']
-    system = subprocess.run([os.path.join(a.app, 'Glasir.exe'), '--system', '--no-dialogs'], capture_output=True,
+    cases = a.case or ['auto', 'fit', 'menu', 'sdr', 'capture', 'live']
+    system = subprocess.run([os.path.join(a.app, EXE), '--system', '--no-dialogs'], capture_output=True,
                             text=True, errors='replace').stdout.strip()
     print(system)
     if not imagecodecs:
@@ -398,9 +522,11 @@ def main():
                 passed, was_hdr = case_auto(a, made)
                 ok &= passed
                 ok &= check(was_hdr == hdr_screen, 'auto follows the screen: HDR10 only with HDR on in Windows')
+            elif name == 'live':
+                ok &= case_live(a, made, hdr_screen)
             else:
                 ok &= {'fit': case_fit, 'menu': case_menu, 'sdr': case_sdr, 'capture': case_capture}[name](a, made)
-            time.sleep(1.0)  # the last Glasir lets go of its lock
+            time.sleep(1.0)  # the last instance lets go of its lock
     finally:
         if not a.keep:
             for f in made:

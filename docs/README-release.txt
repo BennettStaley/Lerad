@@ -1,30 +1,30 @@
-Glasir - modern PC graphics for game consoles
-https://github.com/Abhito/Glasir
+Lerad - modern PC graphics for game consoles
+https://github.com/BennettStaley/Lerad
 
 GETTING STARTED
 
 1. Unzip this folder somewhere you can write to, for example
-   C:\Games\Glasir. Not "Program Files": Glasir keeps its settings, logs
+   C:\Games\Lerad. Not "Program Files": Lerad keeps its settings, logs
    and screenshots in its own folder.
 2. Plug in your capture card and turn the console on.
-3. Start Glasir.exe. In its window, pick your card, the picture (Automatic,
-   SDR or HDR), and the
-   screen to play on. "What you will get" says what your choices come to
-   on this PC, and "Set your console to" what to set on the console for
-   them (resolution, HDR, 120 Hz output, VRR off). The HDR, Frame
-   generation and Sound and window tabs hold the rest.
+3. Start Lerad.exe. On the Play tab of its window, pick your card, the
+   signal (Automatic, SDR or HDR) and the screen to play on. "What you
+   will get" on the right says what your choices come to on this PC, and
+   "Console, set it to" what to set on the console for them (resolution,
+   HDR, 120 Hz output, VRR off). The Picture, Frame generation, Screen,
+   Sound and About tabs hold the rest.
 4. Press Play. The first time, it asks to download the programs it runs on
    (mpv and ReShade, plus DLSS 5 on an NVIDIA RTX 30, 40 or 50 series GPU).
    They come straight from their authors' sites, in the versions this
-   Glasir was tested with; THIRD-PARTY-NOTICES.md lists them and their
+   Lerad was tested with; THIRD-PARTY-NOTICES.md lists them and their
    licences.
 5. While playing, Tab opens the menu. SDR or HDR is found by itself
-   ("Picture: Automatic"); the menu and Glasir's window can also say which.
+   ("Signal: Automatic"); the menu and Lerad's window can also say which.
 
-"Glasir.exe --system" prints what Glasir found on the PC and what your
+"Lerad.exe --system" prints what Lerad found on the PC and what your
 settings will do there.
 
-Settings are in glasir.ini (written on the first start, every setting
+Settings are in lerad.ini (written on the first start, every setting
 explained). Volume, boost and audio delay you change while playing are kept
 there, and so is what you change in the menu (Tab).
 
@@ -53,23 +53,25 @@ Your changes are kept in engine\ReShade.ini and engine\ReShadePreset.ini.
 
 UPDATING
 
-When a newer Glasir is out, its window says so under Play: "Update Glasir"
-installs it (your settings stay). [update] check = 0 in glasir.ini stops
-Glasir from asking GitHub.
+Lerad does not look for newer versions of itself. To move to a newer one,
+unpack it over this folder (your settings stay).
 
-  Update (in the window)   downloads mpv, ReShade and DLSS 5 in the versions
-                           this Glasir was tested with (it says when yours
-                           are others)
-  Glasir.exe --setup       the same, from a command line
-  Glasir.exe --update      installs the newest Glasir
+  About tab (the window)   says when this Lerad was tested with other
+                           versions of mpv, ReShade and DLSS 5 than yours;
+                           "Download tested versions" there gets them
+  Lerad.exe --setup        the same, from a command line
 
 REPORTING A PROBLEM
 
 Press F9 while it happens: a zip with the logs, settings, your GPUs and
-screens (and the frames on screen, with frame generation on) is saved in
-Bug reports\. Your Windows user name is left out. Attach it to an issue at
-https://github.com/Abhito/Glasir/issues and say what you saw.
+screens (and pictures of the frames on screen, with frame generation on) is
+saved in Bug reports\. It is a few MB and your Windows user name is left out.
+Attach it to an issue at https://github.com/BennettStaley/Lerad/issues and
+say what you saw. The frames themselves are saved in Captures\ (about
+100 MB each time): keep the folder the report names in case they are asked
+for, and delete the others whenever you like. "Save a bug report" on the
+About tab saves one without frames.
 
-To remove Glasir, delete its folder.
+To remove Lerad, delete its folder.
 
-Logs: logs\glasir.log, logs\audio.log, engine\ReShade.log.
+Logs: logs\lerad.log, logs\audio.log, engine\ReShade.log.

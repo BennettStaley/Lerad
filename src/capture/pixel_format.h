@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: MIT
-// The capture formats Glasir passes to mpv as raw frames.
+// The capture formats the app passes to mpv as raw frames.
 #pragma once
 #include <windows.h>
 #include <mfapi.h>
 
 #include <cstring>
 
-namespace glasir {
+namespace app {
 
 // NV12 and P010: a full-size Y plane, then a half-height plane of interleaved
 // U and V (8 bits a sample for NV12, 16 for P010 with the 10 bits on top).
@@ -87,4 +87,4 @@ inline int luma10(PixelFormat f, const BYTE *frame, size_t i) {
     return 0;
 }
 
-}  // namespace glasir
+}  // namespace app

@@ -5,7 +5,7 @@
 #include <string>
 #include <vector>
 
-namespace glasir {
+namespace app {
 
 struct GpuInfo {
     std::wstring name;  // e.g. "NVIDIA GeForce RTX 5070 Ti" (Windows' description of the adapter)
@@ -32,7 +32,7 @@ std::vector<GpuInfo> list_gpus();
 struct GpuChoice {
     GpuInfo gpu;         // the one mpv draws on; found = false: no GPU was found (mpv picks)
     GpuInfo screen_gpu;  // the one the screen is plugged into; found = false: unknown
-    bool by_setting = false;         // glasir.ini's display.gpu named it
+    bool by_setting = false;         // the settings file's display.gpu named it
     bool setting_not_found = false;  // display.gpu names no GPU of this PC: the screen's is used
     // gpu is not the screen's: every frame is copied to the screen's GPU
     // (a hybrid laptop with display.gpu set, or a desktop with the screen on
@@ -40,10 +40,10 @@ struct GpuChoice {
     bool other_than_screen = false;
 };
 
-// The GPU for a screen (DisplayInfo::device) and glasir.ini's display.gpu
+// The GPU for a screen (DisplayInfo::device) and the settings file's display.gpu
 // (a part of the name, any case; empty: the screen's own GPU, as drawing
 // where the screen is plugged in is the direct path: no copy between GPUs).
-// Without a GPU for the screen, the first one. Glasir never moves to a
+// Without a GPU for the screen, the first one. The app never moves to a
 // faster GPU by itself: on a hybrid laptop the advice (advice.h) says when
 // display.gpu would get DLSS 5, and what it costs.
 GpuChoice choose_gpu(const std::vector<GpuInfo> &gpus, const std::wstring &screen_device, const std::wstring &wanted);
@@ -55,10 +55,14 @@ GpuInfo display_gpu();
 // DLSS 5 neural rendering runs on RTX 30, 40 and 50 series GPUs (NVIDIA's
 // nvngx_dlssnr.dll 310.9.16 and newer; 310.8 ran on RTX 50 only).
 bool dlss5_gpu(const GpuInfo &gpu);
+// Whether the GPU has DLSS Frame Generation, by its name: GeForce RTX 40 and
+// 50 series and the workstation cards of those generations. The add-on asks
+// the driver itself when it starts; this is for saying so beforehand.
+bool dlss_fg_gpu(const GpuInfo &gpu);
 
 // The video super resolution the GPU's video processor may have, as mpv's
 // d3d11vpp scaling-mode names it: "nvidia" (RTX), "intel", or "none". The
-// driver has the last word: glasir_scaling.lua falls back to FSR 1 if it
+// driver has the last word: scaling.lua falls back to FSR 1 if it
 // turns it down.
 const wchar_t *vsr_kind(const GpuInfo &gpu);
 
@@ -72,4 +76,4 @@ const wchar_t *gpu_class_name(GpuClass c);  // "unknown", "low", "mid", "high"
 // One line for the log and --system: name, memory, class, its screens.
 std::wstring gpu_text(const GpuInfo &gpu);
 
-}  // namespace glasir
+}  // namespace app

@@ -1,16 +1,17 @@
 // SPDX-License-Identifier: MIT
-// Checks the launcher's words and what it saves: the screens and GPUs as it
-// lists them, the "what you will get" lines, the console's settings, where
-// advice is shown, the frame generation choices on a screen, and that only
-// changed values go into glasir.ini.
+// Checks the launcher's words and what it saves: the cards, screens and GPUs
+// as it lists them, "what you will get" as four steps, the line beside Play,
+// the console's settings, where advice is shown, the frame generation choices
+// on a screen, and that only changed values go into the settings file.
 #include <cmath>
 #include <cstdio>
 #include <string>
 #include <vector>
 
+#include "app_version.h"
 #include "launcher_text.h"
 
-using namespace glasir;
+using namespace app;
 
 namespace {
 
@@ -92,31 +93,40 @@ bool contains(const std::wstring &text, const wchar_t *part) { return text.find(
 int main() {
     std::wstring error;
     {
-        // The screens and GPUs as the lists show them.
+        // The cards, screens and GPUs as the lists show them.
+        expect(card_title(L"Video (00 Pro Capture HDMI 4K+)", true) == L"Magewell Pro Capture HDMI 4K+",
+               "a card: the product's name out of the driver's wrapping, with its maker");
+        expect(card_title(L"Elgato 4K X") == L"Elgato 4K X" && card_title(L"Video (Game Capture)") == L"Game Capture" &&
+                   card_title(L"Magewell USB Capture", true) == L"Magewell USB Capture",
+               "a card named plainly stays as it is; the maker is not said twice");
         DisplayInfo d = proart();
-        expect(screen_title(d) == L"1  ·  PA279CDV  ·  3840 x 2160  ·  120 Hz",
+        expect(screen_title(d) == L"1 · PA279CDV · 3840 x 2160 · 120 Hz",
                "a screen's title: number, name, size, rate");
-        expect(screen_details(d) == L"HDR on, peak 1000 nits  ·  FreeSync 48-120 Hz, switched off",
-               "its details: HDR with the peak, VRR with its range and state");
+        expect(screen_details(d) == L"HDR on, peak 1000 nits · variable refresh off (FreeSync)",
+               "its details: HDR with the peak, variable refresh with the screen's brand for it");
+        expect(vrr_brand_text(d) == L"FreeSync, 48-120 Hz" && vrr_found_word(d) == L"off",
+               "the brand with its range, and what was found in a word");
         d.primary = true;
         d.hdr_on = false;
         d.vrr = DisplayInfo::Vrr::On;
         d.vrr_kind = L"G-SYNC Compatible";
         expect(contains(screen_title(d), L"120 Hz, main") && screen_hdr_text(d) == L"HDR off in Windows" &&
-                   screen_vrr_text(d) == L"G-SYNC Compatible 48-120 Hz, on",
-               "the main screen, HDR off in Windows, VRR on");
+                   screen_vrr_text(d) == L"variable refresh on (G-SYNC Compatible)" && vrr_found_word(d) == L"on",
+               "the main screen, HDR off in Windows, variable refresh on");
         // An AMD or Intel GPU: what the screen can do, not whether it is on.
         d.vrr = DisplayInfo::Vrr::Supported;
         d.vrr_kind = L"FreeSync";
         d.hdr_supported = false;
-        expect(screen_vrr_text(d) == L"FreeSync 48-120 Hz (on or off: not known)" && screen_hdr_text(d) == L"no HDR",
-               "VRR only known from the EDID: said so; no HDR");
+        expect(screen_vrr_text(d) == L"variable refresh on or off: not known (FreeSync)" && screen_hdr_text(d) == L"no HDR" &&
+                   vrr_found_word(d) == L"not known",
+               "variable refresh only known from the EDID: said so; no HDR");
         d.vrr = DisplayInfo::Vrr::Unknown;
         d.vrr_kind.clear();
         d.vrr_min_hz = d.vrr_max_hz = 0;
-        expect(screen_vrr_text(d) == L"variable refresh not known", "nothing known about VRR");
+        expect(screen_vrr_text(d) == L"variable refresh not known" && vrr_brand_text(d).empty(),
+               "nothing known about variable refresh");
         d.vrr = DisplayInfo::Vrr::Unsupported;
-        expect(screen_vrr_text(d) == L"no variable refresh", "no VRR");
+        expect(screen_vrr_text(d) == L"no variable refresh" && vrr_found_word(d) == L"none", "no variable refresh");
         expect(monitor_setting(proart()) == L"1", "display.monitor for a screen: its number");
         d.number = 0;
         expect(monitor_setting(d) == L"\\\\.\\DISPLAY1", "... or Windows' name when it has none");
@@ -125,48 +135,77 @@ int main() {
         g.found = true;
         g.name = L"NVIDIA GeForce RTX 5090";
         g.dedicated_mb = 32000;
-        expect(gpu_title(g) == L"NVIDIA GeForce RTX 5090  ·  31 GB", "a GPU: name and memory");
+        expect(gpu_title(g) == L"NVIDIA GeForce RTX 5090 · 31 GB", "a GPU: name and memory");
         g.name = L"Intel(R) UHD Graphics";
         g.dedicated_mb = 128;
         expect(gpu_title(g) == L"Intel(R) UHD Graphics", "an integrated GPU: no memory to name");
     }
     {
-        // What you will get, for the target use.
+        // What you will get, for the target use: four steps, in the order
+        // the picture travels.
+        using Kind = ResultStep::Kind;
         AdviceInput in = target();
         Advice a = advise(in);
-        std::vector<SummaryLine> lines = summary_lines(in, a);
-        expect(lines.size() == 5 && lines[0].text == L"Elgato 4K X: 3840 x 2160 at 30 fps, HDR." && !lines[0].matters,
-               "the capture line");
-        expect(lines[1].text == L"A 30 fps game is shown at 60 (x2)." && !lines[1].matters, "the frames: 30 shown at 60");
-        expect(lines[2].text == L"HDR10 to the screen, as the console sends it." && !lines[2].matters, "HDR passed on");
-        expect(lines[3].text == L"On screen 1 (PA279CDV), 120 Hz, variable refresh off.", "the screen, VRR off");
-        expect(lines[4].text == L"DLSS 5 on.", "DLSS 5, nothing scaled");
-        expect(console_line(a) == L"2160p  ·  HDR on  ·  120 Hz output off  ·  VRR off" &&
-                   contains(console_hint(a), L"HDR calibration"),
+        std::vector<ResultStep> steps = result_steps(in, a);
+        expect(steps.size() == 4 && steps[0].kind == Kind::Console && steps[1].kind == Kind::Card &&
+                   steps[2].kind == Kind::Frames && steps[3].kind == Kind::Screen,
+               "the console, the capture card, the frames, the screen");
+        expect(steps[0].title == L"Console, set it to" && steps[0].chips.size() == 4 && steps[0].chips[0] == L"2160p" &&
+                   steps[0].chips[1] == L"HDR on" && steps[0].chips[2] == L"120 Hz output off" &&
+                   steps[0].chips[3] == L"VRR off" && contains(console_hint(a), L"HDR calibration"),
                "the console: 2160p, HDR on, 120 Hz output off, VRR off, and the calibration hint");
+        expect(steps[1].big == L"3840 x 2160" && steps[1].detail == L"30 fps · HDR (10-bit)" && !steps[1].matters,
+               "the card: the size large, then the rate and the signal");
+        expect(result_steps(in, a, true)[1].detail == L"30 fps · HDR (10-bit) · low latency",
+               "... and that the card passes frames on early, where it does");
+        expect(steps[2].big == L"30 → 60 fps" && steps[2].multiplier == 2 &&
+                   steps[2].detail == L"x2 by " APP_NAME_W L". DLSS 5 on." && !steps[2].matters,
+               "the frames: 30 shown at 60, by the app's own generator");
+        expect(steps[3].big == L"120 Hz · HDR10" && steps[3].detail == L"PA279CDV, variable refresh off." &&
+                   !steps[3].matters,
+               "the screen: its rate and HDR10, its name and variable refresh");
+        PlaySummary sum = play_summary(in, a);
+        expect(sum.state == PlaySummary::State::Warning && sum.word == L"1 warning" &&
+                   sum.text == L"A 30 fps game is shown at 60 fps, in HDR.",
+               "beside Play: one warning (variable refresh is off), and what will be seen");
+
+        // NVIDIA's generator where it is chosen, downloaded and the GPU has it.
+        apply_override(in.settings, L"framegen.backend=dlss", error);
+        a = advise(in);
+        expect(result_steps(in, a)[2].detail == L"x2 by NVIDIA DLSS. DLSS 5 on.", "the frames by NVIDIA DLSS");
+        in.dlssfg_installed = false;
+        a = advise(in);
+        expect(result_steps(in, a)[2].detail == L"x2 by " APP_NAME_W L". DLSS 5 on.",
+               "... and by the app's own until it is downloaded");
+        in.dlssfg_installed = true;
+        apply_override(in.settings, L"framegen.backend=own", error);
 
         // Up to x4, HDR off in Windows, frame generation off.
         apply_override(in.settings, L"framegen.multiplier=4", error);
         in.display.hdr_on = false;
         a = advise(in);
-        lines = summary_lines(in, a);
-        expect(lines[1].text == L"A 30 fps game is shown at 120 (x4)." &&
-                   lines[2].text == L"Tone mapped to SDR: HDR is off in Windows." && lines[2].matters &&
+        steps = result_steps(in, a);
+        expect(steps[2].big == L"30 → 120 fps" && steps[2].multiplier == 4 && steps[3].big == L"120 Hz · SDR" &&
+                   contains(steps[3].detail, L"Tone mapped to SDR: HDR is off in Windows.") && steps[3].matters &&
                    console_hint(a).empty(),
                "x4: 30 shown at 120; HDR tone mapped stands out, no calibration hint");
+        expect(play_summary(in, a).text == L"A 30 fps game is shown at 120 fps, in SDR (tone mapped from HDR).",
+               "... and the sentence beside Play says so");
         apply_override(in.settings, L"hdr.output=sdr", error);
         a = advise(in);
-        expect(!summary_lines(in, a)[2].matters, "tone mapped because it was asked for: nothing to stand out");
+        expect(!result_steps(in, a)[3].matters, "tone mapped because it was asked for: nothing to stand out");
         apply_override(in.settings, L"framegen.enabled=0", error);
         a = advise(in);
-        expect(summary_lines(in, a)[1].text == L"A 30 fps game is shown at 30 (frame generation off).",
+        steps = result_steps(in, a);
+        expect(steps[2].big == L"30 fps" && steps[2].multiplier == 1 && steps[2].detail == L"Frame generation off. DLSS 5 on." &&
+                   contains(play_summary(in, a).text, L"Frame generation is off."),
                "frame generation off");
         // Frame generation on, but it cannot run (no dedup).
         apply_override(in.settings, L"framegen.enabled=1", error);
         apply_override(in.settings, L"frames.dedup=0", error);
         a = advise(in);
-        lines = summary_lines(in, a);
-        expect(contains(lines[1].text, L"frame generation cannot run") && lines[1].matters, "... or unable to run");
+        steps = result_steps(in, a);
+        expect(contains(steps[2].detail, L"Frame generation cannot run") && steps[2].matters, "... or unable to run");
 
         // An SDR 1440p60 capture on that screen, scaled up, VRR set by hand.
         in = target();
@@ -175,38 +214,50 @@ int main() {
             apply_override(in.settings, o, error);
         in.modes = {mode(L"NV12", 2560, 1440, 60)};
         a = advise(in);
-        lines = summary_lines(in, a);
-        expect(lines.size() == 4 && lines[0].text == L"Elgato 4K X: 2560 x 1440 at 60 fps, SDR." &&
-                   lines[1].text == L"A 30 fps game is shown at 60 (x2), a 60 fps game at 120 (x2)." &&
-                   lines[2].text == L"On screen 1 (PA279CDV), 120 Hz, variable refresh on (as set here)." &&
-                   lines[3].text == L"DLSS 5 off; scaled up from 1440 to 2160 lines with ArtCNN.",
-               "SDR 1440p60: two game rates, VRR as set, the scaling named");
+        steps = result_steps(in, a);
+        expect(steps.size() == 4 && steps[1].big == L"2560 x 1440" && steps[1].detail == L"60 fps · SDR" &&
+                   steps[2].big == L"30 → 60 fps" &&
+                   steps[2].detail == L"x2 by " APP_NAME_W L". A 60 fps game: 120 fps (x2). DLSS 5 off." &&
+                   steps[3].big == L"120 Hz · SDR" &&
+                   steps[3].detail == L"PA279CDV, variable refresh on (as set here). Scaled up from 1440 to 2160 lines "
+                                      L"with ArtCNN.",
+               "SDR 1440p60: two game rates, variable refresh as set, the scaling named");
+        sum = play_summary(in, a);
+        expect(sum.state == PlaySummary::State::Ready && sum.word == L"Ready" &&
+                   sum.text == L"A 30 fps game is shown at 60 fps, in SDR.",
+               "nothing in the way: Ready");
 
         // No card.
         in.card_found = false;
         a = advise(in);
-        lines = summary_lines(in, a);
-        expect(lines[0].matters && contains(lines[0].text, L"No capture card"), "no card: said first");
+        steps = result_steps(in, a);
+        expect(steps.size() == 3 && steps[1].kind == Kind::Card && steps[1].matters && steps[1].problem &&
+                   steps[1].big == L"No capture card" && steps[2].kind == Kind::Screen && !steps[2].problem,
+               "no card: said at its step, and no frames to speak of");
+        sum = play_summary(in, a);
+        expect(sum.state == PlaySummary::State::Problem && sum.word == L"Cannot play" &&
+                   sum.text == L"No capture card was found.",
+               "... and beside Play: cannot play, and why");
         // A 60 Hz screen: 60 fps games get nothing.
         in = target();
         in.display.refresh_hz = 60;
         for (const wchar_t *o : {L"video.mode=sdr", L"capture.width=0", L"capture.height=0", L"capture.fps=0"})
             apply_override(in.settings, o, error);
         a = advise(in);
-        expect(summary_lines(in, a)[1].text == L"A 30 fps game is shown at 60 (x2), a 60 fps game at 60.",
+        expect(result_steps(in, a)[2].detail == L"x2 by " APP_NAME_W L". A 60 fps game: no frames added. DLSS 5 on.",
                "60 Hz: 30 at 60, 60 as it is");
     }
     {
         // Where advice goes, and what is hidden.
-        expect(advice_place("hdr-off-in-windows") == AdvicePlace::Hdr && advice_place("vrr-off") == AdvicePlace::Screen &&
+        expect(advice_place("hdr-off-in-windows") == AdvicePlace::Picture && advice_place("vrr-off") == AdvicePlace::Screen &&
                    advice_place("gpu-other-than-screen") == AdvicePlace::Screen &&
-                   advice_place("screen-60hz") == AdvicePlace::Framegen &&
-                   advice_place("framegen-fewer-fit") == AdvicePlace::Framegen &&
-                   advice_place("rec-framegen-quality") == AdvicePlace::Framegen &&
-                   advice_place("dlss5-gpu") == AdvicePlace::Enhancements &&
-                   advice_place("rec-scaling") == AdvicePlace::Enhancements &&
-                   advice_place("card-hdr-limit") == AdvicePlace::Capture &&
-                   advice_place("capture-30fps") == AdvicePlace::Capture,
+                   advice_place("screen-60hz") == AdvicePlace::Frames &&
+                   advice_place("framegen-fewer-fit") == AdvicePlace::Frames &&
+                   advice_place("rec-framegen-quality") == AdvicePlace::Frames &&
+                   advice_place("dlss5-gpu") == AdvicePlace::Extras &&
+                   advice_place("rec-scaling") == AdvicePlace::Picture &&
+                   advice_place("card-hdr-limit") == AdvicePlace::Card &&
+                   advice_place("capture-30fps") == AdvicePlace::Card,
                "each item beside the controls it is about");
         AdviceInput in = target();
         const Advice a = advise(in);
@@ -246,6 +297,9 @@ int main() {
         // The frame generation choices on a screen.
         AdviceInput in = target();  // a fixed 120 Hz (VRR off)
         std::vector<MultiplierChoice> m = multiplier_choices(in);
+        expect(m.size() == 3 && m[0].note == L"30 → 60 fps" && m[1].note == L"does not fit" &&
+                   m[2].note == L"30 → 120 fps",
+               "under each choice: what it comes to, or that it does not fit");
         expect(m.size() == 3 && m[0].usable && m[0].text == L"30 fps shown at 60" && !m[1].usable &&
                    contains(m[1].why, L"90 fps would not fall on whole refreshes of this fixed 120 Hz screen") &&
                    m[2].usable && m[2].text == L"30 fps shown at 120",
@@ -289,7 +343,7 @@ int main() {
                    has(v, L"window.mode=fullscreen") && has(v, L"video.sdr_range=full") &&
                    has(v, L"video.hdr_peak_nits=4000") && has(v, L"framegen.method=blend") &&
                    has(v, L"hdr.dynamic_peak=1") && has(v, L"dlss5.enabled=auto"),
-               "each as glasir.ini spells it");
+               "each as " APP_INI " spells it");
         // Read back, they give the same settings again.
         Settings back = from;
         for (const SettingValue &value : v) apply_override(back, setting_text(value), error);

@@ -15,7 +15,7 @@
 #include "../common/framegen_link.h"
 #include "log.h"
 
-namespace glasir {
+namespace app {
 
 inline LONG64 qpc_now() {
     LARGE_INTEGER t;
@@ -29,7 +29,7 @@ public:
 
     // With a link, new frames are stamped into it, and a new frame that is
     // overwritten before mpv took it is counted as dropped.
-    void set_link(GlasirFrameGenLink *link) { link_ = link; }
+    void set_link(FrameGenLink *link) { link_ = link; }
 
     // Whether the add-on asks for repeats too (frame generation off). Called
     // by the capture thread only; logs when that changes.
@@ -44,7 +44,11 @@ public:
     }
 
     // new_frame: a new picture, not a repeat sent to keep mpv drawing.
-    void publish(const BYTE *data, size_t bytes, bool new_frame) {
+    // arrived: when the frame came from the card (QueryPerformanceCounter), 0
+    // for now. The link's stamp is that time, not the time of this call: the
+    // comparing and copying before it take a few milliseconds that vary, and
+    // frame generation paces by the card's rhythm.
+    void publish(const BYTE *data, size_t bytes, bool new_frame, LONG64 arrived = 0) {
         {
             std::lock_guard<std::mutex> lock(mutex_);
             // A keepalive repeats the last frame sent; while that frame is
@@ -60,7 +64,7 @@ public:
             pending_new_ = new_frame;
             if (link_ && new_frame) {
                 const LONG64 n = link_->published;
-                link_->stamps[n % GlasirFrameGenLink::kStamps] = qpc_now();
+                link_->stamps[n % FrameGenLink::kStamps] = arrived ? arrived : qpc_now();
                 InterlockedIncrement64(&link_->published);  // a full barrier: the stamp is visible first
             }
         }
@@ -108,7 +112,7 @@ private:
     bool stop_ = false;
     bool repeats_wanted_ = false;
     UINT64 published_ = 0, dropped_ = 0;
-    GlasirFrameGenLink *link_ = nullptr;
+    FrameGenLink *link_ = nullptr;
 };
 
-}  // namespace glasir
+}  // namespace app

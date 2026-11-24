@@ -1,27 +1,27 @@
 // SPDX-License-Identifier: MIT
-// glasir_audio.dll: the capture card's sound, played by mpv's process with
+// capture_audio.dll: the capture card's sound, played by mpv's process with
 // low latency. An mpv C plugin: mpv loads it from portable_config\scripts.
 //
 // It captures the card's audio endpoint and plays it on the default output
 // device with WASAPI in shared mode, on its own thread, independently of the
 // video. The output stream belongs to mpv's process, so apps that capture an
-// app's sound (Discord, OBS) see Glasir. Volume and mute follow mpv's
-// properties; boost and the audio delay come from glasir.ini and the keys.
+// app's sound (Discord, OBS) see the app. Volume and mute follow mpv's
+// properties; boost and the audio delay come from the settings file and the keys.
 //
 // Based on native-audio/msc_audio.cpp of the WASAPI audio plugin by z-er
 // (Josh S) for MPV-SW-Capture, https://github.com/z-er/MPV-SW-Capture,
-// MIT licence, Copyright (c) 2026 TyRaS-SW. Modified for Glasir: audio delay,
-// boost to 400 %, endpoint chosen by Glasir, capture period option, log file.
+// MIT licence, Copyright (c) 2026 TyRaS-SW. Modified for this app: audio delay,
+// boost to 400 %, endpoint chosen by the app, capture period option, log file.
 //
-// Options (script-opts, set by Glasir.exe):
-//   glasir_audio-device  endpoint ID or exact name; empty = no audio
-//   glasir_audio-delay   ms the sound is held back (0-1000)
-//   glasir_audio-boost   percent (100-400)
-//   glasir_audio-period  minimum (lowest latency) or default (steadier)
-//   glasir_audio-log     log file
-//   glasir_audio-missing 1: the card's audio input was not found (shown)
-// Script messages: glasir-audio-delay +N|-N|N, glasir-audio-boost +N|-N|N,
-// glasir-audio-restart.
+// Options (script-opts, set by the exe):
+//   capture_audio-device  endpoint ID or exact name; empty = no audio
+//   capture_audio-delay   ms the sound is held back (0-1000)
+//   capture_audio-boost   percent (100-400)
+//   capture_audio-period  minimum (lowest latency) or default (steadier)
+//   capture_audio-log     log file
+//   capture_audio-missing 1: the card's audio input was not found (shown)
+// Script messages: app-audio-delay +N|-N|N, app-audio-boost +N|-N|N,
+// app-audio-restart.
 
 #define MPV_CPLUGIN_DYNAMIC_SYM  // mpv fills in its API when it loads the plugin
 #include <windows.h>
@@ -34,6 +34,7 @@
 #include <avrt.h>
 
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <format>
 #include <mutex>
@@ -44,11 +45,12 @@
 
 #include <mpv/client.h>
 
+#include "app_version.h"
 #include "audio_core.h"
 
 namespace {
 
-using namespace glasir::audio;
+using namespace app::audio;
 
 constexpr int kMaxDelayMs = 1000;
 
@@ -109,6 +111,11 @@ struct Event {
     ~Event() { CloseHandle(h); }
 };
 
+// Milliseconds on a steady clock (GetTickCount64 steps by up to 16 ms).
+double now_ms() {
+    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
 void check(HRESULT hr, const char *what) {
     if (FAILED(hr)) throw std::runtime_error(std::format("{} (0x{:08X})", what, static_cast<unsigned long>(hr)));
 }
@@ -145,13 +152,18 @@ public:
 
     std::atomic<double> gain{1.0};
     std::atomic<int> delay_ms{0};
-    std::atomic<uint64_t> underruns{0}, dropped{0};
-    std::atomic<double> queue_ms{0};
+    // underruns: the queue ran dry. starved: the output device was left
+    // with nothing. skipped: the card said it lost sound. dropped: samples
+    // thrown away to catch up.
+    std::atomic<uint64_t> underruns{0}, starved{0}, skipped{0}, dropped{0};
+    std::atomic<double> queue_ms{0}, spare_ms{0};
 
     void start(const std::string &device, bool minimum_period) {
         halt();
         ResetEvent(stop_.h);
         underruns = 0;
+        starved = 0;
+        skipped = 0;
         dropped = 0;
         set_status("starting");
         thread_ = std::thread([this, device, minimum_period] {
@@ -275,21 +287,27 @@ private:
         check(render_client->GetService(__uuidof(IAudioRenderClient), render.out_void()), "Get render service");
         Com<IAudioSessionControl> session;
         if (SUCCEEDED(render_client->GetService(__uuidof(IAudioSessionControl), session.out_void())))
-            session->SetDisplayName(L"Glasir", nullptr);
+            session->SetDisplayName(APP_NAME_W, nullptr);
 
         UINT32 buffer_frames = 0;
         check(render_client->GetBufferSize(&buffer_frames), "Get output buffer size");
         const double input_rate = in.p->nSamplesPerSec, output_rate = out.p->nSamplesPerSec;
         const double nominal_step = input_rate / output_rate;
-        // About one output period queued, not the endpoint's whole buffer.
-        const UINT32 output_target = std::min(buffer_frames, render_period + UINT32(output_rate * .002));
+        // About one output period queued, not the endpoint's whole buffer;
+        // 2 ms more each time the device was left with nothing (to 10 ms).
+        const UINT32 output_least = std::min(buffer_frames, render_period + UINT32(output_rate * .002));
+        const UINT32 output_most = std::min(buffer_frames, render_period + UINT32(output_rate * .012));
+        UINT32 output_target = output_least;
         const size_t base = size_t(std::max(input_rate * .012, capture_period + render_period * nominal_step));
         Ring ring(size_t(input_rate * (0.2 + kMaxDelayMs / 1000.0)));
+        Margin margin(input_rate);
+        Smooth smooth(output_rate);
+        spare_ms = margin.ms();
         log(std::format("audio: \"{}\" {} Hz {} ch -> default output {} Hz {} ch; periods {:.2f} / {:.2f} ms "
-                        "({}), queue {:.2f} ms + delay",
+                        "({}), queue {:.2f} ms + {:.0f} ms spare (more when it runs dry) + delay",
                         input_name, in.p->nSamplesPerSec, in.p->nChannels, out.p->nSamplesPerSec, out.p->nChannels,
                         capture_period * 1000 / input_rate, render_period * 1000 / output_rate,
-                        minimum_period ? "minimum" : "default", base * 1000 / input_rate));
+                        minimum_period ? "minimum" : "default", base * 1000 / input_rate, margin.ms()));
 
         BYTE *initial = nullptr;
         check(render->GetBuffer(output_target, &initial), "Prime output buffer");
@@ -303,14 +321,24 @@ private:
         StopClient stop_render{render_client.p};
         set_status("running");
 
-        bool primed = false;
+        bool primed = false, first_packet = true;
         double current_gain = 0;
         HANDLE events[] = {stop_.h, capture_event.h, render_event.h};
-        ULONGLONG last_capture = GetTickCount64();
+        double last_capture = now_ms(), last_turn = last_capture;
+        // What went wrong is written once a minute, only when something did.
+        struct Report {
+            double at = 0, longest_wait = 0, longest_turn = 0;
+            uint64_t underruns = 0, starved = 0, skipped = 0, dropped = 0;
+        } report;
+        report.at = last_capture;
         for (;;) {
             const DWORD wait = WaitForMultipleObjects(3, events, FALSE, 1000);
             if (wait == WAIT_OBJECT_0) break;
             if (wait == WAIT_FAILED) throw std::runtime_error("audio event wait failed");
+            const double now = now_ms();
+            const double turn = now - last_turn;  // how long this thread was away
+            last_turn = now;
+            report.longest_turn = std::max(report.longest_turn, turn);
             UINT32 packet = 0;
             check(capture->GetNextPacketSize(&packet), "Get capture packet size");
             while (packet) {
@@ -330,22 +358,37 @@ private:
                     ring.push(sample);
                 }
                 check(capture->ReleaseBuffer(frames), "Release capture packet");
-                last_capture = GetTickCount64();
+                // The first packet after a start always carries the flag.
+                if ((flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY) && !first_packet) ++skipped;
+                first_packet = false;
+                report.longest_wait = std::max(report.longest_wait, now - last_capture);
+                last_capture = now;
                 check(capture->GetNextPacketSize(&packet), "Get capture packet size");
             }
-            if (GetTickCount64() - last_capture > 5000)
-                throw std::runtime_error("the card stopped sending sound");
+            const double waited = now - last_capture;  // for the card's next packet, so far
+            if (waited > 5000) throw std::runtime_error("the card stopped sending sound");
 
-            // The queue holds what the devices need plus the delay. Raising
-            // the delay waits (silence) until the queue has filled to it;
-            // lowering it, or a stall, drops the oldest sound.
-            const size_t target = std::min(queue_target(input_rate, base, delay_ms.load()), ring.capacity() - 1);
-            if (ring.size() > target + size_t(input_rate * .030)) ring.trim(target);
+            // The queue holds what the devices need, the spare and the
+            // delay. Raising the delay waits (silence) until the queue has
+            // filled to it; lowering it, or a stall, drops the oldest sound.
+            const size_t target = std::min(queue_target(input_rate, base + margin.samples(), delay_ms.load()),
+                                           ring.capacity() - 1);
+            if (ring.size() > target + size_t(input_rate * .030)) {
+                ring.trim(target);
+                smooth.cut();
+            }
             if (primed && ring.size() + size_t(input_rate * .020) < target) primed = false;
             if (!primed && ring.size() >= target) primed = true;
 
             UINT32 padding = 0;
             check(render_client->GetCurrentPadding(&padding), "Get output padding");
+            // Nothing left in the device: it has played a gap. When this
+            // thread came late by a few ms (not a stall), keep more in it.
+            if (!padding) {
+                ++starved;
+                if (turn < Margin::kStallMs)
+                    output_target = std::min(output_most, output_target + UINT32(output_rate * .002));
+            }
             const UINT32 frames = padding < output_target ? output_target - padding : 0;
             if (frames) {
                 BYTE *data = nullptr;
@@ -358,11 +401,18 @@ private:
                 const double step = nominal_step * (1 + correction);
                 const double requested_gain = gain.load();
                 const double gain_step = (requested_gain - current_gain) / std::max(1.0, output_rate * .005);
+                bool ran_dry = false;
                 for (UINT32 f = 0; f < frames; ++f) {
                     Stereo sample;
-                    if (primed && !ring.read(step, sample)) {
-                        primed = false;
-                        ++underruns;
+                    if (primed && ring.read(step, sample)) {
+                        sample = smooth.play(sample);
+                    } else {
+                        if (primed) {
+                            primed = false;
+                            ran_dry = true;
+                            ++underruns;
+                        }
+                        sample = smooth.gap();  // dies away: a hard cut is a pop
                     }
                     if (std::abs(requested_gain - current_gain) <= std::abs(gain_step))
                         current_gain = requested_gain;
@@ -379,9 +429,26 @@ private:
                     }
                 }
                 check(render->ReleaseBuffer(frames, 0), "Release output buffer");
+                if (ran_dry)
+                    margin.ran_dry(now, std::max(waited, turn));
+                else if (primed)
+                    margin.left(now, ring.size());
+                spare_ms = margin.ms();
             }
             queue_ms = ring.size() * 1000 / input_rate;
             dropped = ring.dropped;
+
+            if (now - report.at >= 60000) {
+                const uint64_t u = underruns.load(), s = starved.load(), k = skipped.load(), d = dropped.load();
+                if (u != report.underruns || s != report.starved || k != report.skipped || d != report.dropped)
+                    log(std::format("last minute: queue ran dry {}, output left empty {}, card lost sound {}, "
+                                    "{} samples dropped; longest wait for the card {:.1f} ms, longest this thread "
+                                    "was away {:.1f} ms; now {:.0f} ms spare, {:.1f} ms kept in the output",
+                                    u - report.underruns, s - report.starved, k - report.skipped, d - report.dropped,
+                                    report.longest_wait, report.longest_turn, margin.ms(),
+                                    output_target * 1000 / output_rate));
+                report = {now, 0, 0, u, s, k, d};
+            }
         }
         set_status("stopped");
     }
@@ -421,11 +488,11 @@ int adjust(int value, const char *arg) {
     return (arg[0] == '+' || arg[0] == '-') ? value + n : n;
 }
 
-// A message over the picture: Glasir's overlay shows it (after DLSS 5 and
+// A message over the picture: the app's overlay shows it (after DLSS 5 and
 // frame generation), not mpv's OSD.
 void show(mpv_handle *mpv, const std::string &text, int ms = 1500) {
     const std::string duration = std::to_string(ms);
-    const char *cmd[] = {"script-message", "glasir-toast", text.c_str(), duration.c_str(), nullptr};
+    const char *cmd[] = {"script-message", "app-toast", text.c_str(), duration.c_str(), nullptr};
     mpv_command_async(mpv, 0, cmd);
 }
 
@@ -436,13 +503,13 @@ void publish(mpv_handle *mpv, const char *key, const std::string &value) {
 }  // namespace
 
 extern "C" MPV_EXPORT int mpv_open_cplugin(mpv_handle *mpv) {
-    const std::string log_path = script_opt(mpv, "glasir_audio-log");
+    const std::string log_path = script_opt(mpv, "capture_audio-log");
     // Shared, so a bug report can read it while playing.
     if (!log_path.empty()) g_log = _wfsopen(widen(log_path).c_str(), L"w", _SH_DENYNO);
-    const std::string device = script_opt(mpv, "glasir_audio-device");
-    const bool minimum_period = script_opt(mpv, "glasir_audio-period") != "default";
-    int delay = std::clamp(to_int(script_opt(mpv, "glasir_audio-delay"), 0), 0, kMaxDelayMs);
-    int boost = std::clamp(to_int(script_opt(mpv, "glasir_audio-boost"), 100), 100, 400);
+    const std::string device = script_opt(mpv, "capture_audio-device");
+    const bool minimum_period = script_opt(mpv, "capture_audio-period") != "default";
+    int delay = std::clamp(to_int(script_opt(mpv, "capture_audio-delay"), 0), 0, kMaxDelayMs);
+    int boost = std::clamp(to_int(script_opt(mpv, "capture_audio-boost"), 100), 100, 400);
 
     Engine engine;
     double volume = 100;
@@ -451,14 +518,14 @@ extern "C" MPV_EXPORT int mpv_open_cplugin(mpv_handle *mpv) {
     engine.delay_ms = delay;
     update_gain();
     ULONGLONG missing_notice = 0;  // when to say the card's audio input was not found
-    publish(mpv, "user-data/glasir/audio-delay", std::to_string(delay));
-    publish(mpv, "user-data/glasir/audio-boost", std::to_string(boost));
+    publish(mpv, "user-data/app/audio-delay", std::to_string(delay));
+    publish(mpv, "user-data/app/audio-boost", std::to_string(boost));
     if (device.empty()) {
         log("audio off (no device)");
-        publish(mpv, "user-data/glasir/audio-status", "off");
+        publish(mpv, "user-data/app/audio-status", "off");
         // Said a moment later: the overlay that shows it connects once
         // the picture is up.
-        if (script_opt(mpv, "glasir_audio-missing") == "1") missing_notice = GetTickCount64() + 4000;
+        if (script_opt(mpv, "capture_audio-missing") == "1") missing_notice = GetTickCount64() + 4000;
     } else {
         engine.start(device, minimum_period);
     }
@@ -472,7 +539,7 @@ extern "C" MPV_EXPORT int mpv_open_cplugin(mpv_handle *mpv) {
         if (event->event_id == MPV_EVENT_SHUTDOWN) break;
         if (missing_notice && GetTickCount64() >= missing_notice) {
             missing_notice = 0;
-            show(mpv, "No sound: the capture card's audio input was not found. Set [audio] device in glasir.ini.",
+            show(mpv, "No sound: the capture card's audio input was not found. Set [audio] device in " APP_INI ".",
                  8000);
         }
         if (event->event_id == MPV_EVENT_PROPERTY_CHANGE) {
@@ -489,19 +556,19 @@ extern "C" MPV_EXPORT int mpv_open_cplugin(mpv_handle *mpv) {
             const char *arg = message->num_args > 1 ? message->args[1] : nullptr;
             // "quiet": from the in-game menu, which shows the value itself.
             const bool quiet = message->num_args > 2 && !strcmp(message->args[2], "quiet");
-            if (!strcmp(what, "glasir-audio-delay")) {
+            if (!strcmp(what, "app-audio-delay")) {
                 delay = std::clamp(adjust(delay, arg), 0, kMaxDelayMs);
                 engine.delay_ms = delay;
-                publish(mpv, "user-data/glasir/audio-delay", std::to_string(delay));
+                publish(mpv, "user-data/app/audio-delay", std::to_string(delay));
                 if (!quiet) show(mpv, std::format("Audio delay: {} ms", delay));
                 log(std::format("audio delay {} ms", delay));
-            } else if (!strcmp(what, "glasir-audio-boost")) {
+            } else if (!strcmp(what, "app-audio-boost")) {
                 boost = std::clamp(adjust(boost, arg), 100, 400);
                 update_gain();
-                publish(mpv, "user-data/glasir/audio-boost", std::to_string(boost));
+                publish(mpv, "user-data/app/audio-boost", std::to_string(boost));
                 if (!quiet) show(mpv, std::format("Audio boost: {}%", boost));
                 log(std::format("audio boost {}%", boost));
-            } else if (!strcmp(what, "glasir-audio-restart") && !device.empty()) {
+            } else if (!strcmp(what, "app-audio-restart") && !device.empty()) {
                 show(mpv, "Audio: restarting");
                 engine.start(device, minimum_period);
             }
@@ -510,17 +577,20 @@ extern "C" MPV_EXPORT int mpv_open_cplugin(mpv_handle *mpv) {
             published = GetTickCount64();
             const std::string status = device.empty() ? "off" : engine.status();
             if (status != last_status) {
-                publish(mpv, "user-data/glasir/audio-status", status);
+                publish(mpv, "user-data/app/audio-status", status);
                 if (status.rfind("error:", 0) == 0) show(mpv, "Audio " + status, 8000);
                 last_status = status;
             }
-            publish(mpv, "user-data/glasir/audio-stats",
-                    std::format("queue={:.1f}ms underruns={} dropped={} gain={:.3f}", engine.queue_ms.load(),
-                                engine.underruns.load(), engine.dropped.load(), engine.gain.load()));
+            publish(mpv, "user-data/app/audio-stats",
+                    std::format("queue={:.1f}ms spare={:.0f}ms underruns={} starved={} skipped={} dropped={} gain={:.3f}",
+                                engine.queue_ms.load(), engine.spare_ms.load(), engine.underruns.load(),
+                                engine.starved.load(), engine.skipped.load(), engine.dropped.load(),
+                                engine.gain.load()));
         }
     }
     engine.halt();
-    log(std::format("audio closed: {} underruns, {} samples dropped", engine.underruns.load(), engine.dropped.load()));
+    log(std::format("audio closed: queue ran dry {}, output left empty {}, card lost sound {}, {} samples dropped",
+                    engine.underruns.load(), engine.starved.load(), engine.skipped.load(), engine.dropped.load()));
     if (g_log) fclose(g_log);
     g_log = nullptr;
     return 0;

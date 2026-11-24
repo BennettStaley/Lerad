@@ -7,11 +7,12 @@
 #include <string>
 #include <vector>
 
+#include "app_version.h"
 #include "hdr.h"
 #include "mpv_launch.h"
 #include "settings.h"
 
-using namespace glasir;
+using namespace app;
 
 namespace {
 
@@ -123,12 +124,12 @@ int main() {
         expect(passes_through(mpv_arguments(p010(hdr_on_no_peak), s)), "auto, HDR on, no peak reported: passed through");
     }
     {
-        // The same picture tags in every case: HDR10, the peak from glasir.ini.
+        // The same picture tags in every case: HDR10, the peak from the settings file.
         s.hdr_peak_nits = 800;
-        const std::wstring tags = L"--vf=format=colormatrix=bt.2020-ncl:colorlevels=limited:primaries=bt.2020:"
+        const std::wstring tags = L"--vf=@app-colour:format=colormatrix=bt.2020-ncl:colorlevels=limited:primaries=bt.2020:"
                                   L"gamma=pq:max-luma=800:max_cll=800";
         expect(has(mpv_arguments(p010(hdr_on), s), tags) && has(mpv_arguments(p010(no_hdr), s), tags),
-               "the frames are tagged HDR10 with glasir.ini's peak, whatever the output");
+               "the frames are tagged HDR10 with " APP_INI "'s peak, whatever the output");
         s.hdr_peak_nits = 1000;
     }
     {
@@ -148,7 +149,7 @@ int main() {
         p = hdr_plan(f, hdr_on);
         expect(p.output == HdrPlan::Output::Sdr && p.reason == HdrPlan::Reason::Setting && !p.fit,
                "output = sdr with HDR on: SDR");
-        expect(hdr_plan_text(p) == L"Tone mapped to SDR: glasir.ini asks for it ([hdr] output = sdr)", "its text");
+        expect(hdr_plan_text(p) == L"Tone mapped to SDR: as chosen under Send it as", "its text");
         expect(to_sdr(mpv_arguments(p010(hdr_on), f)), "output = sdr, HDR on: SDR swap chain");
         expect(to_sdr(mpv_arguments(p010(no_hdr), f)), "output = sdr, SDR screen: SDR swap chain");
     }
@@ -212,34 +213,85 @@ int main() {
         }
     }
     {
+        // A 10-bit capture that goes from SDR to HDR or back while playing:
+        // the same decisions as mpv's properties, set over IPC.
+        using Properties = std::vector<std::pair<std::wstring, std::wstring>>;
+        auto value = [](const Properties &p, const wchar_t *name) {
+            for (const auto &[k, v] : p)
+                if (k == name) return v;
+            return std::wstring(L"(unset)");
+        };
+        auto never_rebuilds = [](const Properties &p) {
+            for (const auto &[k, v] : p)
+                if (k.rfind(L"d3d11-", 0) == 0) return false;
+            return !p.empty() && p.back().first == L"target-colorspace-hint";
+        };
+        Properties p = hdr_live_properties(hdr_plan(s, hdr_on), s, true);
+        expect(value(p, L"target-colorspace-hint") == L"yes" && value(p, L"target-colorspace-hint-mode") == L"source" &&
+                   value(p, L"target-peak") == L"auto" && value(p, L"hdr-compute-peak") == L"no" &&
+                   value(p, L"tone-mapping") == L"bt.2390" && never_rebuilds(p),
+               "live to HDR, HDR on: passed through, as a start in HDR (the hint last, no d3d11 option)");
+        p = hdr_live_properties(hdr_plan(s, hdr_off), s, true);
+        expect(value(p, L"target-colorspace-hint") == L"no" && value(p, L"target-peak") == L"auto" &&
+                   value(p, L"hdr-compute-peak") == L"no" && value(p, L"tone-mapping") == L"auto" &&
+                   value(p, L"target-colorspace-hint-mode") == L"(unset)" && never_rebuilds(p),
+               "live to HDR, HDR off in Windows: tone mapped into the SDR swap chain");
+        Settings f = s;
+        f.hdr_fit_to_screen = true;
+        f.hdr_dynamic_peak = true;
+        f.tone_mapping = L"hable";
+        p = hdr_live_properties(hdr_plan(f, hdr_on), f, true);
+        expect(value(p, L"target-colorspace-hint") == L"yes" && value(p, L"target-colorspace-hint-mode") == L"target" &&
+                   value(p, L"target-peak") == L"400" && value(p, L"hdr-compute-peak") == L"yes" &&
+                   value(p, L"tone-mapping") == L"hable" && never_rebuilds(p),
+               "live to HDR, fitted: the screen's peak, the curve and peak measuring reach mpv");
+        p = hdr_live_properties(hdr_plan(f, hdr_off), f, true);
+        expect(value(p, L"target-colorspace-hint") == L"no" && value(p, L"hdr-compute-peak") == L"yes" &&
+                   value(p, L"tone-mapping") == L"hable",
+               "live to HDR, SDR output: the curve and peak measuring; fitting does not apply");
+        for (const DisplayInfo &d : {hdr_on, hdr_off, no_hdr, unread}) {
+            p = hdr_live_properties(hdr_plan(f, d), f, false);
+            expect(p.size() == 2 && value(p, L"target-colorspace-hint") == L"no" && value(p, L"target-peak") == L"auto" &&
+                       never_rebuilds(p),
+                   "live to SDR: an SDR swap chain, and the peak from fitting taken back");
+        }
+    }
+    {
         // What the menu is told, and the menu's white.
         auto e = hdr_environment(s, hdr_on);
-        expect(env(e, L"GLASIR_HDR_OUTPUT") == L"hdr" && env(e, L"GLASIR_HDR_WHY").empty() &&
-                   env(e, L"GLASIR_HDR_PEAK_NITS") == L"400" && env(e, L"GLASIR_HDR_DYNAMIC_PEAK") == L"0" &&
-                   env(e, L"GLASIR_PAPER_WHITE_NITS") == L"420",
+        expect(env(e, L"HDR_OUTPUT") == L"hdr" && env(e, L"HDR_WHY").empty() &&
+                   env(e, L"HDR_PEAK_NITS") == L"400" && env(e, L"HDR_DYNAMIC_PEAK") == L"0" &&
+                   env(e, L"PAPER_WHITE_NITS") == L"420",
                "menu, HDR on: hdr, the screen's peak, white at Windows' SDR brightness");
         e = hdr_environment(s, hdr_off);
-        expect(env(e, L"GLASIR_HDR_OUTPUT") == L"sdr" && env(e, L"GLASIR_HDR_WHY") == L"HDR is off in Windows" &&
-                   env(e, L"GLASIR_PAPER_WHITE_NITS") == L"203",
+        expect(env(e, L"HDR_OUTPUT") == L"sdr" && env(e, L"HDR_WHY") == L"HDR is off in Windows" &&
+                   env(e, L"PAPER_WHITE_NITS") == L"203",
                "menu, HDR off: sdr and why; white at 203 nits when Windows names none");
         Settings sdr;
         sdr.paper_white_nits = 300;
         e = hdr_environment(sdr, hdr_on);
-        expect(env(e, L"GLASIR_HDR_OUTPUT").empty() && env(e, L"GLASIR_HDR_WHY").empty() &&
-                   env(e, L"GLASIR_PAPER_WHITE_NITS") == L"300",
-               "menu, SDR capture: nothing left of an HDR start; paper_white_nits from glasir.ini");
+        expect(env(e, L"HDR_OUTPUT").empty() && env(e, L"HDR_WHY").empty() &&
+                   env(e, L"PAPER_WHITE_NITS") == L"300",
+               "menu, SDR capture: nothing left of an HDR start; paper_white_nits from " APP_INI);
+        e = hdr_environment(sdr, hdr_on, true);
+        expect(env(e, L"HDR_OUTPUT") == L"hdr" && env(e, L"HDR_PEAK_NITS") == L"400" &&
+                   env(e, L"HDR_DYNAMIC_PEAK") == L"0" && env(e, L"PAPER_WHITE_NITS") == L"300",
+               "menu, a 10-bit capture shown as SDR: told what is done with HDR, it may come while playing");
+        e = hdr_environment(sdr, hdr_off, true);
+        expect(env(e, L"HDR_OUTPUT") == L"sdr" && env(e, L"HDR_WHY") == L"HDR is off in Windows",
+               "menu, the same with HDR off in Windows: sdr and why");
         DisplayInfo odd = hdr_on;
         odd.sdr_white_nits = 5000;
         expect(paper_white_nits(s, odd) == 203.0, "a white that makes no sense: 203 nits");
     }
     {
-        // glasir.ini: the new key, and the default file's [hdr] section parses.
+        // The settings file: the new key, and the default file's [hdr] section parses.
         Settings t;
         std::wstring error;
         expect(apply_override(t, L"hdr.fit_to_screen=1", error) && t.hdr_fit_to_screen, "--set hdr.fit_to_screen=1");
         expect(!apply_override(t, L"hdr.fit_to_screen=maybe", error), "hdr.fit_to_screen = maybe is refused");
         expect(std::string(default_settings_text()).find("\nfit_to_screen = 0\n") != std::string::npos,
-               "the default glasir.ini has fit_to_screen = 0");
+               "the default " APP_INI " has fit_to_screen = 0");
         expect(!Settings().hdr_fit_to_screen && Settings().hdr_output == Settings::HdrOutput::Auto,
                "defaults: output = auto, not fitted");
     }

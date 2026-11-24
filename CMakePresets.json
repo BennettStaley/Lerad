@@ -8,7 +8,7 @@
       "generator": "Visual Studio 18 2026",
       "architecture": "x64",
       "binaryDir": "${sourceDir}/build/vs",
-      "installDir": "${sourceDir}/out/Glasir"
+      "installDir": "${sourceDir}/out/Lerad"
     },
     {
       "name": "vs2022",

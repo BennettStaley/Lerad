@@ -7,15 +7,16 @@
 
 #include "json.h"
 
-namespace glasir::overlay {
+namespace app::overlay {
 namespace {
 
 // What the menu follows; the ids are the indexes.
 const char *const kProperties[] = {
-    "volume", "mute", "fullscreen", "user-data/glasir/audio-boost", "user-data/glasir/audio-delay", "width", "height",
-    "user-data/glasir/scaling", "osd-dimensions",
+    "volume", "mute", "fullscreen", "user-data/app/audio-boost", "user-data/app/audio-delay", "width", "height",
+    "user-data/app/scaling", "osd-dimensions",
     // HDR (ids 10 to 14).
     "target-colorspace-hint-mode", "target-peak", "tone-mapping", "hdr-compute-peak", "video-target-params",
+    "user-data/app/signal",
 };
 
 int to_int(const Json &v, int fallback) {
@@ -100,12 +101,12 @@ void MpvClient::on_line(const std::string &line) {
     if (line.find("\"client-message\"") != std::string::npos) {
         const auto j = Json::parse(line);
         const Json *args = j ? j->get("args") : nullptr;
-        if (args && !args->items().empty() && args->items()[0].string() == "glasir-screenshot") {
+        if (args && !args->items().empty() && args->items()[0].string() == "app-screenshot") {
             std::lock_guard lock(m_);
             ++screenshots_;
             return;
         }
-        if (!args || args->items().size() < 2 || args->items()[0].string() != "glasir-toast") return;
+        if (!args || args->items().size() < 2 || args->items()[0].string() != "app-toast") return;
         std::lock_guard lock(m_);
         toast_.text = args->items()[1].string();
         toast_.seconds = args->items().size() > 2 ? std::atoi(args->items()[2].string().c_str()) / 1000.0 : 0;
@@ -173,6 +174,7 @@ void MpvClient::on_line(const std::string &line) {
         state_.out_peak = peak ? peak->number(0) : 0;
         break;
     }
+    case 14: state_.signal = data && data->is(Json::Type::String) ? data->string() : ""; break;
     default: break;
     }
 }
@@ -208,9 +210,9 @@ void MpvClient::run() {
         for (size_t i = 0; i < std::size(kProperties); ++i)
             observe += "{\"command\":[\"observe_property\"," + std::to_string(i + 1) + "," + json_quote(kProperties[i]) +
                        "]}\n";
-        // Says that this add-on takes Glasir's screenshots (the s key), so
-        // glasir_screenshot.lua leaves them to it.
-        observe += "{\"command\":[\"set_property\",\"user-data/glasir/screenshot\",\"overlay\"]}\n";
+        // Says that this add-on takes the app's screenshots (the s key), so
+        // screenshot.lua leaves them to it.
+        observe += "{\"command\":[\"set_property\",\"user-data/app/screenshot\",\"overlay\"]}\n";
         bool ok = write(observe);
         if (ok) {
             std::lock_guard lock(m_);
@@ -273,4 +275,4 @@ void MpvClient::run() {
     CloseHandle(write_ov.hEvent);
 }
 
-}  // namespace glasir::overlay
+}  // namespace app::overlay

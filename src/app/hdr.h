@@ -1,18 +1,18 @@
 // SPDX-License-Identifier: MIT
-// What is done with an HDR capture (glasir.ini video.mode = hdr), decided in
+// What is done with an HDR capture (the settings file's video.mode = hdr), decided in
 // one place from the [hdr] settings and the screen: the launcher, mpv's
 // options, the log and the in-game menu all say and do the same thing.
 //
 // Two questions:
 //
 // 1. HDR or SDR to the screen. HDR10 when Windows has HDR on for the screen
-//    (or glasir.ini says so); else mpv tone maps the picture to SDR, as it
+//    (or the settings file says so); else mpv tone maps the picture to SDR, as it
 //    must: PQ values on an SDR screen are a grey, washed-out picture.
 //
 // 2. In HDR, who brings down highlights brighter than the screen. By default
-//    nobody in Glasir: the picture goes out as the console sends it, the way
+//    nobody in the app: the picture goes out as the console sends it, the way
 //    it would over a cable, and the console's own HDR calibration (done
-//    through Glasir) sets the peak. That cannot make a chain that is set up
+//    through the app) sets the peak. That cannot make a chain that is set up
 //    right look worse, and it does not depend on the peak the screen reports
 //    to Windows, which is often wrong (a 1000 nit screen saying 400).
 //    [hdr] fit_to_screen = 1 has mpv fit the picture to the screen's peak
@@ -25,7 +25,7 @@
 #include "display.h"
 #include "settings.h"
 
-namespace glasir {
+namespace app {
 
 struct HdrPlan {
     enum class Output { Hdr, Sdr };
@@ -37,10 +37,10 @@ struct HdrPlan {
     // False: the picture goes out as the console sends it.
     bool fit = false;
     // The screen's peak the picture is fitted to, or would be if fit were
-    // switched on: glasir.ini's, else what the screen reports. 0: unknown
+    // switched on: the settings file's, else what the screen reports. 0: unknown
     // (then nothing can be fitted, and fit is false).
     int peak_nits = 0;
-    bool peak_reported = false;  // peak_nits is the screen's own word, not glasir.ini's
+    bool peak_reported = false;  // peak_nits is the screen's own word, not the settings file's
     // HDR output although Windows has HDR off for the screen ([hdr] output = hdr).
     bool forced_without_hdr = false;
 };
@@ -55,20 +55,35 @@ std::wstring hdr_plan_text(const HdrPlan &plan);
 // Only the reason for SDR ("HDR is off in Windows"); "" for HDR output.
 std::wstring hdr_sdr_reason(const HdrPlan &plan);
 
-// mpv's name for the tone mapping curve: glasir.ini's, or for "auto" the one
+// mpv's name for the tone mapping curve: the settings file's, or for "auto" the one
 // that suits the output (bt.2390 between HDR peaks, mpv's own for SDR).
 const wchar_t *hdr_tone_mapping(const HdrPlan &plan, const Settings &s);
 
 // mpv's output options for an HDR capture.
 std::vector<std::wstring> hdr_mpv_options(const HdrPlan &plan, const Settings &s);
 
-// What the in-game menu needs to know (it runs inside mpv): environment
-// variables to set before mpv starts. Set for an SDR capture too, so that
-// nothing is left over from a start in the other mode.
-std::vector<std::pair<std::wstring, std::wstring>> hdr_environment(const Settings &s, const DisplayInfo &display);
+// The same while playing: mpv's properties (name, value) to set over IPC when
+// a 10-bit capture goes from SDR to HDR (hdr) or back, in the order to set
+// them. An HDR picture gets what hdr_mpv_options gives a start in HDR; an SDR
+// one an SDR swap chain, and the peak fitting may have set is taken back, as
+// after a start in SDR.
+// The swap chain follows target-colorspace-hint. Never d3d11-output-csp or
+// d3d11-output-format: set while playing, they make mpv build its output
+// again, ReShade and all.
+std::vector<std::pair<std::wstring, std::wstring>> hdr_live_properties(const HdrPlan &plan, const Settings &s,
+                                                                       bool hdr);
 
-// The menu's white in HDR, in nits: glasir.ini's, else Windows' "SDR content
+// What the in-game menu needs to know (it runs inside mpv): environment
+// variables to set before mpv starts, named as set_env() takes them
+// (app_env.h). Set for an SDR capture too, so that nothing is left over from
+// a start in the other mode. may_become_hdr: a capture shown as SDR now that
+// can go to HDR while playing (10-bit): the menu is told what is done with
+// HDR all the same.
+std::vector<std::pair<std::wstring, std::wstring>> hdr_environment(const Settings &s, const DisplayInfo &display,
+                                                                   bool may_become_hdr = false);
+
+// The menu's white in HDR, in nits: the settings file's, else Windows' "SDR content
 // brightness" for the screen, else BT.2408's 203.
 double paper_white_nits(const Settings &s, const DisplayInfo &display);
 
-}  // namespace glasir
+}  // namespace app

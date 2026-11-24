@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// shot_convert IN.png OUT_FOLDER [STEM]: makes the files Glasir's screenshot
+// shot_convert IN.png OUT_FOLDER [STEM]: makes the files the app's screenshot
 // would make of a frame saved by a frame generation capture (Captures\...\
 // f01.png: 16-bit PNG = HDR10 PQ, 8-bit = SDR), then reads the .jxr back and
 // checks it holds the same light. To try the HDR tone mapping on game
@@ -17,7 +17,7 @@
 #include "screenshot.h"
 
 using Microsoft::WRL::ComPtr;
-using namespace glasir::overlay;
+using namespace app::overlay;
 
 namespace {
 

@@ -16,18 +16,21 @@
 #include <imgui.h>
 #include <imgui_impl_dx11.h>
 
+#include "app_env.h"
 #include "compositor.h"
 #include "menu.h"
 #include "mpv_client.h"
 #include "screenshot.h"
+#include "stream_out.h"
+#include "view_shifter.h"
 
 using Microsoft::WRL::ComPtr;
 
-namespace glasir::overlay {
+namespace app::overlay {
 namespace {
 
 constexpr UINT kOpenKey = VK_TAB;
-constexpr float kPaperNits = 203.0f;  // BT.2408's reference white: the menu in HDR when Glasir names no other
+constexpr float kPaperNits = 203.0f;  // BT.2408's reference white: the menu in HDR when the app names no other
 constexpr double kToastFade = 0.25;    // seconds a toast takes to fade out
 
 struct Overlay {
@@ -52,19 +55,25 @@ struct Overlay {
     bool source_auto = false;
     bool hdr_available = true;
     bool borderless = true;
-    // The menu's and the toasts' white in HDR (GLASIR_PAPER_WHITE_NITS:
-    // glasir.ini's, else Windows' "SDR content brightness" for the screen),
+    // The menu's and the toasts' white in HDR (env PAPER_WHITE_NITS:
+    // the settings file's, else Windows' "SDR content brightness" for the screen),
     // so that they are as bright as the desktop's own windows.
     float paper_nits = kPaperNits;
-    // What Glasir does with an HDR capture (its hdr.h), for the menu.
+    // What the app does with an HDR capture (its hdr.h), for the menu.
     std::string hdr_output, hdr_why;
     int hdr_peak_nits = 0;
     bool hdr_dynamic_peak = false;
     bool show_rates = false;  // the frame rate readout in the corner
-    // The screen Glasir.exe plays on and its variable refresh, as told.
+    bool input_on = false;        // the app runs the input program (env INPUT)
+    int mouse_sensitivity = 30;   // the settings file's input.sensitivity
+    int mouse_aim = 100;          // and input.aim_sensitivity, percent
+    bool mouse_forward = true;    // input.mouse_forward
+    int mouse_lead = 140;         // input.lead_ms
+    // The screen the exe plays on and its variable refresh, as told.
     std::string display_name, display_vrr;
     bool display_vrr_set = false;
     double display_hz = 0;
+    std::string demo;  // env MENU_DEMO, a test switch (menu.h)
     // Frames the menu was drawn on since it opened: mpv's presents, and the
     // real frames frame generation presents itself.
     unsigned on_mpv = 0, on_real = 0;
@@ -80,6 +89,8 @@ struct Overlay {
     unsigned local_serial = 0, local_seen = 0;
     // Screenshots: the one being read back, and the requests seen.
     shot::Grabber shots;
+    StreamOut stream;  // the stream window's frames (stream_out.h)
+    ViewShifter shifter;  // the picture moved ahead of the console's answer (view_shift.h)
     unsigned shots_seen = 0;
 };
 
@@ -108,13 +119,10 @@ std::string windows_font(const char *file) {
     return GetFileAttributesA(path.c_str()) == INVALID_FILE_ATTRIBUTES ? std::string() : path;
 }
 
-// An environment variable Glasir set before it started mpv; "" if unset.
+// An environment variable the app set before it started mpv; "" if unset.
 std::string environment(const wchar_t *name) {
-    wchar_t value[256] = {};
-    const DWORD n = GetEnvironmentVariableW(name, value, 256);
-    if (n == 0 || n >= 256) return {};
     std::string out;
-    for (DWORD i = 0; i < n; ++i) out.push_back(value[i] < 128 ? char(value[i]) : '?');  // Glasir's own plain text
+    for (const wchar_t c : env(name)) out.push_back(c < 128 ? char(c) : '?');  // the app's own plain text
     return out;
 }
 
@@ -132,7 +140,9 @@ bool init(ID3D11Device *device) {
     io.ConfigDebugHighlightIdConflicts = false;  // a developer's warning, not for players
 #endif
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
-    // Segoe UI, which every Windows has (not shipped with Glasir).
+    // Segoe UI, which every Windows has (not shipped with the app); Dear
+    // ImGui's own small font where it is missing. The sizes are the style's
+    // (ui_style.h): Dear ImGui makes each size of a font when it is first drawn.
     const std::string font = windows_font("segoeui.ttf");
     if (font.empty() || !io.Fonts->AddFontFromFileTTF(font.c_str())) io.Fonts->AddFontDefault();
     const std::string bold = windows_font("seguisb.ttf");
@@ -140,34 +150,39 @@ bool init(ID3D11Device *device) {
     g.backend = ImGui_ImplDX11_Init(device, g.context.Get());
     if (!g.backend) return false;
 
-    wchar_t path[MAX_PATH] = {};
-    if (GetEnvironmentVariableW(L"GLASIR_SETTINGS", path, MAX_PATH) > 0) g.settings_path = path;
-    wchar_t mode[8] = {};
-    g.source_hdr = GetEnvironmentVariableW(L"GLASIR_VIDEO_MODE", mode, 8) > 0 && _wcsicmp(mode, L"hdr") == 0;
-    wchar_t video_auto[4] = {};
-    g.source_auto = GetEnvironmentVariableW(L"GLASIR_VIDEO_AUTO", video_auto, 4) > 0 && wcscmp(video_auto, L"1") == 0;
+    g.settings_path = env(L"SETTINGS");
+    g.source_hdr = _wcsicmp(env(L"VIDEO_MODE").c_str(), L"hdr") == 0;
+    g.source_auto = env(L"VIDEO_AUTO") == L"1";
     // Unset (mpv started some other way): offered, as before.
-    wchar_t hdr_available[4] = {};
-    g.hdr_available = GetEnvironmentVariableW(L"GLASIR_HDR_AVAILABLE", hdr_available, 4) == 0 ||
-                      wcscmp(hdr_available, L"0") != 0;
-    wchar_t window_mode[16] = {};
-    g.borderless = GetEnvironmentVariableW(L"GLASIR_WINDOW_MODE", window_mode, 16) == 0 ||
-                   _wcsicmp(window_mode, L"windowed") != 0;
-    // The readout in the corner: glasir.ini's own value (the menu keeps it there).
+    g.hdr_available = env(L"HDR_AVAILABLE") != L"0";
+    g.borderless = _wcsicmp(env(L"WINDOW_MODE").c_str(), L"windowed") != 0;
+    // The readout in the corner: the settings file's own value (the menu keeps it there).
     if (!g.settings_path.empty())
         g.show_rates = GetPrivateProfileIntW(L"framegen", L"show_rates", 0, g.settings_path.c_str()) != 0;
-    const double paper = std::atof(environment(L"GLASIR_PAPER_WHITE_NITS").c_str());
+    // The mouse, when the app runs the input program: the settings file's
+    // values, which the menu changes there.
+    g.input_on = env(L"INPUT") == L"1";
+    g.shifter.set_name(env(L"VIEW_SHIFT"));
+    if (!g.settings_path.empty()) {
+        g.mouse_sensitivity = int(GetPrivateProfileIntW(L"input", L"sensitivity", 30, g.settings_path.c_str()));
+        g.mouse_aim = int(GetPrivateProfileIntW(L"input", L"aim_sensitivity", 100, g.settings_path.c_str()));
+        g.mouse_forward = GetPrivateProfileIntW(L"input", L"mouse_forward", 1, g.settings_path.c_str()) != 0;
+        g.mouse_lead = int(GetPrivateProfileIntW(L"input", L"lead_ms", 140, g.settings_path.c_str()));
+    }
+    const double paper = std::atof(environment(L"PAPER_WHITE_NITS").c_str());
     g.paper_nits = paper >= 80 && paper <= 1000 ? float(paper) : kPaperNits;
-    g.hdr_output = environment(L"GLASIR_HDR_OUTPUT");
-    g.hdr_why = environment(L"GLASIR_HDR_WHY");
-    g.hdr_peak_nits = std::atoi(environment(L"GLASIR_HDR_PEAK_NITS").c_str());
-    g.hdr_dynamic_peak = environment(L"GLASIR_HDR_DYNAMIC_PEAK") == "1";
-    g.display_name = environment(L"GLASIR_DISPLAY_NAME");
-    g.display_vrr = environment(L"GLASIR_DISPLAY_VRR");
-    g.display_vrr_set = environment(L"GLASIR_DISPLAY_VRR_SET") == "1";
-    g.display_hz = std::atof(environment(L"GLASIR_DISPLAY_HZ").c_str());
+    g.hdr_output = environment(L"HDR_OUTPUT");
+    if (const int brightness = std::atoi(environment(L"STREAM_BRIGHTNESS").c_str())) g.stream.set_brightness(brightness);
+    g.hdr_why = environment(L"HDR_WHY");
+    g.hdr_peak_nits = std::atoi(environment(L"HDR_PEAK_NITS").c_str());
+    g.hdr_dynamic_peak = environment(L"HDR_DYNAMIC_PEAK") == "1";
+    g.display_name = environment(L"DISPLAY_NAME");
+    g.display_vrr = environment(L"DISPLAY_VRR");
+    g.display_vrr_set = environment(L"DISPLAY_VRR_SET") == "1";
+    g.display_hz = std::atof(environment(L"DISPLAY_HZ").c_str());
+    g.demo = environment(L"MENU_DEMO");
     char ready[96];
-    snprintf(ready, sizeof(ready), "Glasir menu: ready (white in HDR: %.0f nits)", g.paper_nits);
+    snprintf(ready, sizeof(ready), APP_NAME " menu: ready (white in HDR: %.0f nits)", g.paper_nits);
     reshade::log::message(reshade::log::level::info, ready);
     return true;
 }
@@ -187,7 +202,7 @@ void feed_input(reshade::api::effect_runtime *runtime, UINT width, UINT height, 
     static const std::pair<UINT, ImGuiKey> keys[] = {
         {VK_UP, ImGuiKey_UpArrow},     {VK_DOWN, ImGuiKey_DownArrow}, {VK_LEFT, ImGuiKey_LeftArrow},
         {VK_RIGHT, ImGuiKey_RightArrow}, {VK_RETURN, ImGuiKey_Enter}, {VK_SPACE, ImGuiKey_Space},
-        {VK_HOME, ImGuiKey_Home},      {VK_END, ImGuiKey_End},
+        {VK_HOME, ImGuiKey_Home},      {VK_END, ImGuiKey_End},        {VK_DELETE, ImGuiKey_Delete},
     };
     for (const auto &[vk, key] : keys) io.AddKeyEvent(key, runtime->is_key_down(vk));
 
@@ -210,17 +225,20 @@ void set_open(bool open) {
     if (open == g.open) return;
     g.open = open;
     if (open) {
-        reshade::log::message(reshade::log::level::info, "Glasir menu: open");
+        reshade::log::message(reshade::log::level::info, APP_NAME " menu: open");
     } else {
         char text[128];
-        snprintf(text, sizeof(text), "Glasir menu: closed; it was drawn on %u frames mpv presented, %u real frames",
+        snprintf(text, sizeof(text), APP_NAME " menu: closed; it was drawn on %u frames mpv presented, %u real frames",
                  g.on_mpv, g.on_real);
         reshade::log::message(reshade::log::level::info, text);
     }
     g.on_mpv = g.on_real = 0;
-    if (!open) g.closed_at = now_seconds();
+    if (!open) {
+        g.closed_at = now_seconds();
+        menu_closed(g.host, g.settings_path);
+    }
     // mpv hides the cursor when the mouse rests; the menu needs it.
-    g.mpv.command({"set", "cursor-autohide", open ? "no" : "100"});  // Glasir starts mpv with 100
+    g.mpv.command({"set", "cursor-autohide", open ? "no" : "100"});  // the app starts mpv with 100
     if (open) g.last.QuadPart = 0;
 }
 
@@ -265,6 +283,17 @@ void build_and_draw(ID3D11DeviceContext *context, ID3D11Texture2D *back_buffer, 
         frame.display_vrr = g.display_vrr;
         frame.display_vrr_set = g.display_vrr_set;
         frame.display_hz = g.display_hz;
+        frame.demo = g.demo;
+        frame.stream_offered = g.stream.offered();
+        frame.stream_on = g.stream.wanted();
+        frame.set_stream = [](bool on) { g.stream.set_wanted(on); };
+        frame.stream_brightness = g.stream.brightness();
+        frame.set_stream_brightness = [](int percent) { g.stream.set_brightness(percent); };
+        frame.input_on = g.input_on;
+        frame.mouse_sensitivity = &g.mouse_sensitivity;
+        frame.mouse_aim = &g.mouse_aim;
+        frame.mouse_forward = &g.mouse_forward;
+        frame.mouse_lead = &g.mouse_lead;
         frame.scale = scale;
         frame.show_rates = &g.show_rates;
         keep = draw_menu(frame);
@@ -285,11 +314,11 @@ void build_and_draw(ID3D11DeviceContext *context, ID3D11Texture2D *back_buffer, 
         ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
         if (!g.compositor.composite(context, back_buffer, g.encoding, g.paper_nits) && !reported) {
             reported = true;
-            reshade::log::message(reshade::log::level::warning, "Glasir menu: could not draw on this back buffer");
+            reshade::log::message(reshade::log::level::warning, APP_NAME " menu: could not draw on this back buffer");
         }
     } else if (!reported) {
         reported = true;
-        reshade::log::message(reshade::log::level::warning, "Glasir menu: could not make its texture");
+        reshade::log::message(reshade::log::level::warning, APP_NAME " menu: could not make its texture");
     }
     if (!keep) set_open(false);
 }
@@ -319,8 +348,8 @@ bool toast_showing() { return now_seconds() < g.toast_until; }
 
 void shot_done(bool ok, const std::string &text) {
     reshade::log::message(ok ? reshade::log::level::info : reshade::log::level::error,
-                          ("Glasir screenshot: " + std::string(ok ? "saved " : "failed: ") + text).c_str());
-    toast(ok ? "Screenshot saved" : "Screenshot failed, see ReShade.log");
+                          (APP_NAME " screenshot: " + std::string(ok ? "saved " : "failed: ") + text).c_str());
+    toast(ok ? "Screenshot saved" : "Screenshot failed: the logs folder says why");
 }
 
 // The picture's part of a width x height back buffer: without mpv's black
@@ -338,9 +367,20 @@ D3D11_BOX picture_box(const MpvState::Osd &osd, UINT width, UINT height) {
     return picture;
 }
 
+// Moves the picture's part of a frame about to be presented by what the
+// input program asks for now.
+void shift_view(ID3D11DeviceContext *context, ID3D11Texture2D *back_buffer) {
+    D3D11_TEXTURE2D_DESC bb{};
+    back_buffer->GetDesc(&bb);
+    g.shifter.apply(g.device, context, back_buffer, picture_box(g.mpv.state().osd, bb.Width, bb.Height),
+                    encoding_of(g.color_space.load()), g.paper_nits);
+}
+
 }  // namespace
 
 void set_host(const Host &host) { g.host = host; }
+
+D3D11_BOX picture_box(UINT width, UINT height) { return picture_box(g.mpv.state().osd, width, height); }
 
 void toast(const std::string &text, double seconds) {
     std::lock_guard lock(g.local_m);
@@ -361,16 +401,24 @@ void before_frame_generation(reshade::api::effect_runtime *runtime) {
     if (!device || !swapchain || !g.device || device != g.device) return;  // the menu's device is mpv's
     g.shots.tick(g.context.Get(), shot_done);
     const unsigned asked = g.mpv.screenshot_requests();
-    if (asked == g.shots_seen) return;
+    const bool shot = asked != g.shots_seen;
+    // The stream window takes every game frame, as the screenshot would be.
+    const bool stream = g.stream.wanted();
+    if (!stream) g.stream.frame(device, g.context.Get(), nullptr, Encoding::Sdr, {});  // lets go of what it held
+    if (!shot && !stream) return;
+    ComPtr<ID3D11Texture2D> back_buffer;
+    if (FAILED(swapchain->GetBuffer(0, IID_PPV_ARGS(&back_buffer)))) return;
+    D3D11_TEXTURE2D_DESC bb{};
+    back_buffer->GetDesc(&bb);
+    if (stream)
+        g.stream.frame(device, g.context.Get(), back_buffer.Get(), encoding_of(g.color_space.load()),
+                       picture_box(g.mpv.state().osd, bb.Width, bb.Height));
+    if (!shot) return;
     g.shots_seen = asked;
     if (g.shots.busy()) {
         toast("Screenshot: still saving the last one");
         return;
     }
-    ComPtr<ID3D11Texture2D> back_buffer;
-    if (FAILED(swapchain->GetBuffer(0, IID_PPV_ARGS(&back_buffer)))) return;
-    D3D11_TEXTURE2D_DESC bb{};
-    back_buffer->GetDesc(&bb);
     std::string error;
     if (!g.shots.grab(device, g.context.Get(), back_buffer.Get(), encoding_of(g.color_space.load()),
                       picture_box(g.mpv.state().osd, bb.Width, bb.Height), error))
@@ -388,7 +436,7 @@ void on_reshade_present(reshade::api::effect_runtime *runtime) {
     static bool seen = false;
     if (!seen) {
         seen = true;
-        reshade::log::message(reshade::log::level::info, "Glasir menu: Tab opens it");
+        reshade::log::message(reshade::log::level::info, APP_NAME " menu: Tab opens it");
     }
 
     // mpv's line (for the toasts) and the drawing are set up at once, not on
@@ -400,8 +448,15 @@ void on_reshade_present(reshade::api::effect_runtime *runtime) {
     }
     if (!g.device && !init(device)) {
         g.failed = true;
-        reshade::log::message(reshade::log::level::error, "Glasir menu: could not start; it stays off");
+        reshade::log::message(reshade::log::level::error, APP_NAME " menu: could not start; it stays off");
         return;
+    }
+
+    // The picture moved ahead of the console (view_shift.h), before anything
+    // of the menu's is drawn on the frame. Not under the open menu.
+    if (g.shifter.named() && !g.open) {
+        ComPtr<ID3D11Texture2D> frame;
+        if (SUCCEEDED(swapchain->GetBuffer(0, IID_PPV_ARGS(&frame)))) shift_view(g.context.Get(), frame.Get());
     }
 
     if (runtime->is_key_pressed(kOpenKey) || (g.open && runtime->is_key_pressed(VK_ESCAPE))) set_open(!g.open);
@@ -416,6 +471,7 @@ void on_reshade_present(reshade::api::effect_runtime *runtime) {
 }
 
 void draw_again(ID3D11DeviceContext *context, ID3D11Texture2D *back_buffer) {
+    if (g.device && g.shifter.named() && !g.open) shift_view(context, back_buffer);
     // Built again rather than drawn again: the menu then answers at the rate
     // frames reach the screen, not at mpv's.
     if ((!g.open && !toast_showing() && !g.show_rates) || !g.runtime || !g.imgui) return;
@@ -424,7 +480,9 @@ void draw_again(ID3D11DeviceContext *context, ID3D11Texture2D *back_buffer) {
 }
 
 void release() {
+    g.shifter.release();
     g.shots.release();
+    g.stream.release();
     g.mpv.stop();
     g.mpv_started = false;
     g.toast_until = 0;
@@ -443,4 +501,4 @@ void release() {
     g.style_height = 0;
 }
 
-}  // namespace glasir::overlay
+}  // namespace app::overlay

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: MPL-2.0
 # Shaders compiled to headers: profile|entry|define|variable|header|source
-set(GLASIR_FRAMEGEN_SHADERS
+set(APP_FRAMEGEN_SHADERS
     "vs_5_0|VSMain|-|g_blend_vs|blend_vs.h|blend.hlsl"
     "ps_5_0|PSMain|-|g_blend_ps|blend_ps.h|blend.hlsl"
     "cs_5_0|LumaFromColorCS|LUMA0|g_luma0_cs|luma0_cs.h|flow.hlsl"
@@ -8,6 +8,7 @@ set(GLASIR_FRAMEGEN_SHADERS
     "cs_5_0|SearchCS|SEARCH|g_search_cs|search_cs.h|flow.hlsl"
     "cs_5_0|MedianCS|MEDIAN|g_median_cs|median_cs.h|flow.hlsl"
     "cs_5_0|MidCS|MID|g_mid_cs|mid_cs.h|flow.hlsl"
+    "cs_5_0|HoldCS|HOLD|g_hold_cs|hold_cs.h|flow.hlsl"
     "ps_5_0|WarpPS|WARP|g_warp_ps|warp_ps.h|flow.hlsl"
     "cs_5_0|StatsCS|STATS|g_stats_cs|stats_cs.h|flow.hlsl"
     "cs_5_0|CutCS|CUT|g_cut_cs|cut_cs.h|flow.hlsl"
@@ -28,4 +29,23 @@ set(GLASIR_FRAMEGEN_SHADERS
     "cs_5_0|ClassCS|L_CLASS|g_lclass_cs|lclass_cs.h|flow.hlsl"
     "cs_5_0|RefineCS|L_REFINE|g_lrefine_cs|lrefine_cs.h|flow.hlsl"
     "cs_5_0|PickCS|L_PICK|g_lpick_cs|lpick_cs.h|flow.hlsl"
+    # The HUD mask (fg_hud.h).
+    "cs_5_0|LumaCS|HUD_LUMA|g_hud_luma_cs|hud_luma_cs.h|hud.hlsl"
+    "cs_5_0|BgCS|HUD_BG|g_hud_bg_cs|hud_bg_cs.h|hud.hlsl"
+    "cs_5_0|FillCS|HUD_FILL|g_hud_fill_cs|hud_fill_cs.h|hud.hlsl"
+    "cs_5_0|WaysCS|HUD_WAYS|g_hud_ways_cs|hud_ways_cs.h|hud.hlsl"
+    "cs_5_0|UpdateCS|HUD_UPDATE|g_hud_update_cs|hud_update_cs.h|hud.hlsl"
+    "cs_5_0|RangeCS|HUD_RANGE|g_hud_range_cs|hud_range_cs.h|hud.hlsl"
+    "cs_5_0|MeanCS|HUD_MEAN|g_hud_mean_cs|hud_mean_cs.h|hud.hlsl"
+    "cs_5_0|PlainCS|HUD_PLAIN|g_hud_plain_cs|hud_plain_cs.h|hud.hlsl"
+    "cs_5_0|MaskCS|HUD_MASK|g_hud_mask_cs|hud_mask_cs.h|hud.hlsl"
+    "cs_5_0|CountCS|HUD_COUNT|g_hud_count_cs|hud_count_cs.h|hud.hlsl"
+    "vs_5_0|ApplyVS|HUD_APPLY_VS|g_hud_apply_vs|hud_apply_vs.h|hud.hlsl"
+    "ps_5_0|ApplyPS|HUD_APPLY|g_hud_apply_ps|hud_apply_ps.h|hud.hlsl"
+    "ps_5_0|CleanPS|HUD_CLEAN|g_hud_clean_ps|hud_clean_ps.h|hud.hlsl"
+    # The block motion as a game's motion vectors (fg_anr.h).
+    "ps_5_0|PSMain|-|g_vectors_ps|vectors_ps.h|vectors.hlsl"
+    # NVIDIA Video Frame Generation (fg_vfg.h).
+    "cs_5_0|PackCS|PACK|g_vfg_pack_cs|vfg_pack_cs.h|vfg.hlsl"
+    "ps_5_0|UnpackPS|UNPACK|g_vfg_unpack_ps|vfg_unpack_ps.h|vfg.hlsl"
 )

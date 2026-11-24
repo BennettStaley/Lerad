@@ -9,10 +9,12 @@
 #include <sstream>
 #include <vector>
 
+#include "../common/keep_regions.h"
+#include "app_version.h"
 #include "components.h"
 #include "log.h"
 
-namespace glasir {
+namespace app {
 namespace {
 
 bool exists(const std::wstring &path) {
@@ -96,7 +98,7 @@ void put_plain(const std::wstring &path, const std::string &key, const std::stri
 }
 
 // Where DLSS5_Feed.fx gets its motion vectors (DLSS5_MV_PROVIDER). 5: its own
-// estimator, from DLSS5-Feeder 2.0 on. 3: LumeniteFX's Kernel, which Glasir
+// estimator, from DLSS5-Feeder 2.0 on. 3: LumeniteFX's Kernel, which the app
 // installed with older Feeders (up to 0.1.3); such an install keeps it until
 // setup brings it up to date. 1 and 2 are providers a user installed: kept.
 int motion_vectors(const std::wstring &engine_dir, const std::wstring &ini) {
@@ -109,7 +111,7 @@ int motion_vectors(const std::wstring &engine_dir, const std::wstring &ini) {
     if (shader.find("DLSS5_MV_PROVIDER == 5") != std::string::npos) return 5;
     if (exists(engine_dir + L"\\reshade-shaders\\Shaders\\LumeniteFX\\lumenite_Kernel.fx")) return 3;
     log(L"DLSS5_Feed.fx has no motion vectors of its own and LumeniteFX is not installed: update DLSS 5 "
-        L"(\"Glasir.exe --setup\")");
+        L"(\"" APP_EXE_W L" --setup\")");
     return 5;
 }
 
@@ -135,15 +137,23 @@ void write_reshade_config(const std::wstring &engine_dir, const Settings &s, boo
     put_default(ini, L"GENERAL", L"PerformanceMode", L"1");
     put_default(ini, L"GENERAL", L"NoDebugInfo", L"1");
 
-    // Frame generation follows glasir.ini on every start (F8 toggles it for
+    // Frame generation follows the settings file on every start (F8 toggles it for
     // the session).
-    put(ini, L"GLASIR_FRAMEGEN", L"Enabled", s.framegen ? L"1" : L"0");
-    put(ini, L"GLASIR_FRAMEGEN", L"Quality", s.framegen_fast ? L"fast" : L"high");
-    put(ini, L"GLASIR_FRAMEGEN", L"Method", s.framegen_blend ? L"blend" : L"motion");
-    put(ini, L"GLASIR_FRAMEGEN", L"Multiplier", std::to_wstring(s.framegen_multiplier));
-    put(ini, L"GLASIR_FRAMEGEN", L"MaxOutputHz", std::to_wstring(s.framegen_max_hz));
-    put(ini, L"GLASIR_FRAMEGEN", L"DedupWhenOff", s.all_frames_when_off ? L"0" : L"1");
-    put(ini, L"GLASIR_FRAMEGEN", L"MpvPipe", L"glasir");
+    put(ini, APP_ENV_PREFIX_W L"FRAMEGEN", L"Enabled", s.framegen ? L"1" : L"0");
+    put(ini, APP_ENV_PREFIX_W L"FRAMEGEN", L"Quality", s.framegen_fast ? L"fast" : L"high");
+    put(ini, APP_ENV_PREFIX_W L"FRAMEGEN", L"Method", s.framegen_blend ? L"blend" : L"motion");
+    put(ini, APP_ENV_PREFIX_W L"FRAMEGEN", L"Backend", s.framegen_video ? L"video" : s.framegen_anr ? L"anr" : s.framegen_dlss ? L"dlss" : L"own");
+    put(ini, APP_ENV_PREFIX_W L"FRAMEGEN", L"Multiplier", std::to_wstring(s.framegen_multiplier));
+    {
+        // Without commas: ReShade ends a value at one (keep_regions.h).
+        std::vector<KeepRegion> keep;
+        parse_keep_regions(narrow(s.framegen_keep), keep);
+        put(ini, APP_ENV_PREFIX_W L"FRAMEGEN", L"Keep", widen(reshade_keep_text(keep)));
+    }
+    put(ini, APP_ENV_PREFIX_W L"FRAMEGEN", L"Hud", s.framegen_hud ? L"1" : L"0");
+    put(ini, APP_ENV_PREFIX_W L"FRAMEGEN", L"MaxOutputHz", std::to_wstring(s.framegen_max_hz));
+    put(ini, APP_ENV_PREFIX_W L"FRAMEGEN", L"DedupWhenOff", s.all_frames_when_off ? L"0" : L"1");
+    put(ini, APP_ENV_PREFIX_W L"FRAMEGEN", L"MpvPipe", APP_ID_W);
 
     if (!dlss5_installed(engine_dir)) return;
     // DLSS 5: DLSS5_Feed.fx hands the picture to the DLSS5-Feeder add-on,
@@ -161,6 +171,21 @@ void write_reshade_config(const std::wstring &engine_dir, const Settings &s, boo
     // whether it shows is the effects' state (the menu switches them; RenoDX's
     // own key, F6, toggles its part for the session).
     put(ini, L"RenoDX.DLSS5", L"NeuralUplift", dlss5_loaded ? L"1" : L"0");
+    // RenoDX's own notes over the picture (its status pill, toasts, issue
+    // notes): with DLSS 5 off at start all they have to say is that it is
+    // idle ("NR is idle - only Frame Generation is on" when DLSS Frame
+    // Generation runs), so its "Do not disturb" is set. With DLSS 5 on the
+    // choice is the user's again: taken back only where the app set it.
+    const wchar_t *const ours = APP_ENV_PREFIX_W L"FRAMEGEN";
+    if (!(dlss5_loaded && dlss5_on)) {
+        if (get(ini, L"RenoDX.DLSS5", L"UiDoNotDisturb") != L"1") {
+            put(ini, L"RenoDX.DLSS5", L"UiDoNotDisturb", L"1");
+            put(ini, ours, L"Dlss5Quieted", L"1");
+        }
+    } else if (get(ini, ours, L"Dlss5Quieted") == L"1") {
+        put(ini, L"RenoDX.DLSS5", L"UiDoNotDisturb", L"0");
+        put(ini, ours, L"Dlss5Quieted", L"0");
+    }
     // RenoDX's screenshot key (F5): its Auto source (0, its default) takes
     // the presented frame, which here is mpv's window, not the picture DLSS 5
     // made (the Feeder runs it on a device of its own), so F5 saved nothing
@@ -174,9 +199,9 @@ void write_reshade_config(const std::wstring &engine_dir, const Settings &s, boo
     put_plain(preset, "Techniques", dlss5_loaded && dlss5_on ? techniques : "");
     put_plain(preset, "TechniqueSorting", techniques);
     // The Feeder writes its file with working defaults on its first start;
-    // Glasir only switches it (and makes one only to keep it off).
+    // the app only switches it (and makes one only to keep it off).
     const std::wstring feeder = engine_dir + L"\\dlss5-feed.cfg";
     if (exists(feeder) || !dlss5_loaded) put_plain(feeder, "enabled", dlss5_loaded ? "1" : "0");
 }
 
-}  // namespace glasir
+}  // namespace app

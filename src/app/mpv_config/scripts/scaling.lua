@@ -1,9 +1,9 @@
 -- SPDX-License-Identifier: MIT
--- How Glasir scales the capture up to its place on the screen, before DLSS 5
+-- How the app scales the capture up to its place on the screen, before DLSS 5
 -- and frame generation (they work on what mpv presents):
 --
 --   mpv      mpv's own scaler (Lanczos)
---   fsr      AMD FSR 1 (shaders/glasir_fsr1.glsl): edge-adaptive upscaling
+--   fsr      AMD FSR 1 (shaders/fsr1.glsl): edge-adaptive upscaling
 --            and sharpening, any GPU
 --   vsr      the GPU's video super resolution (mpv's d3d11vpp filter, in the
 --            GPU's video processor): NVIDIA RTX or Intel; FSR 1 where it
@@ -17,18 +17,20 @@
 -- capture on a 1440p screen). The scale follows the window: it is checked
 -- again when the window or the capture changes size.
 --
--- Options (script-opts glasir_scaling-...): mode, vsr (nvidia, intel or
+-- Options (script-opts scaling-...): mode, vsr (nvidia, intel or
 -- none: what the GPU has), hdr (yes: HDR10 frames), hdr_peak (nits, as
--- tagged: the same tags as Glasir's own format filter gives the capture, so
+-- tagged: the same tags as the app's own format filter gives the capture, so
 -- mpv's output, passed through or tone mapped, does not change with VSR).
--- "script-message glasir-scaling <mode>" switches while playing
--- (the in-game menu); user-data/glasir/scaling says the mode.
+-- "script-message app-scaling <mode>" switches while playing
+-- (the in-game menu); user-data/app/scaling says the mode.
+-- "script-message app-signal hdr|sdr" says what the frames are from now on
+-- (the app, when the console's signal or the menu's choice changes).
 local mp = require 'mp'
 local opts = { mode = 'mpv', vsr = 'nvidia', hdr = false, hdr_peak = 1000 }
 local options_changed  -- set below
-require('mp.options').read_options(opts, 'glasir_scaling', function() options_changed() end)
+require('mp.options').read_options(opts, 'scaling', function() options_changed() end)
 
-local FSR = '~~/shaders/glasir_fsr1.glsl'
+local FSR = '~~/shaders/fsr1.glsl'
 -- The shaders each mode runs, in order. Each runs only when the picture is
 -- made larger: the CNN doubles from 1.3x up, and FSR 1 after it does what is
 -- left (all of it below 1.3x, beyond 2x the rest); Anime4K's own passes
@@ -51,16 +53,20 @@ local function vsr_name()
         or 'Video Super Resolution'
 end
 NAMES.vsr = vsr_name()
-local LABELS = { '@glasir-vsr-in', '@glasir-vsr', '@glasir-vsr-out' }
+local LABELS = { '@app-vsr-in', '@app-vsr', '@app-vsr-out' }
 local mode = NAMES[opts.mode] and opts.mode or 'mpv'
+-- What the frames are now: as mpv started, then as the app says. Not read
+-- from the options again when those change (they say how mpv started).
+local hdr = opts.hdr
 local vsr_scale = nil  -- the scale VSR runs at; nil: not in the filter chain
+local vsr_hdr = false  -- the filters in the chain were made for HDR10 frames
 local function has_vsr() return opts.vsr == 'nvidia' or opts.vsr == 'intel' end
 local vsr_failed = not has_vsr()
 local shaders = {}     -- the shaders this script put in glsl-shaders
 local pending = nil
 
 local function toast(text)
-    mp.commandv('script-message', 'glasir-toast', text)
+    mp.commandv('script-message', 'app-toast', text)
 end
 
 local function same(a, b)
@@ -106,14 +112,14 @@ local function add_vsr(scale)
     -- The video processor shifts PQ / BT.2020 frames toward magenta when it
     -- scales them: they go in tagged as BT.709 and come out tagged as HDR10
     -- again. Only the tags change; the values pass through as they are.
-    if opts.hdr then
-        chain[#chain + 1] = '@glasir-vsr-in:format=colormatrix=bt.709:colorlevels=limited:primaries=bt.709:gamma=bt.1886'
+    if hdr then
+        chain[#chain + 1] = '@app-vsr-in:format=colormatrix=bt.709:colorlevels=limited:primaries=bt.709:gamma=bt.1886'
     end
-    chain[#chain + 1] = string.format('@glasir-vsr:d3d11vpp=format=%s:scaling-mode=%s:scale=%.6f',
-        opts.hdr and 'p010' or 'nv12', opts.vsr, scale)
-    if opts.hdr then
+    chain[#chain + 1] = string.format('@app-vsr:d3d11vpp=format=%s:scaling-mode=%s:scale=%.6f',
+        hdr and 'p010' or 'nv12', opts.vsr, scale)
+    if hdr then
         chain[#chain + 1] = string.format(
-            '@glasir-vsr-out:format=colormatrix=bt.2020-ncl:colorlevels=limited:primaries=bt.2020:gamma=pq:max-luma=%d:max_cll=%d',
+            '@app-vsr-out:format=colormatrix=bt.2020-ncl:colorlevels=limited:primaries=bt.2020:gamma=pq:max-luma=%d:max_cll=%d',
             opts.hdr_peak, opts.hdr_peak)
     end
     for _, f in ipairs(chain) do
@@ -132,16 +138,17 @@ local function vsr_unavailable()
     toast(NAMES.vsr .. ' is not available here: FSR 1 instead')
 end
 
--- Puts the chosen mode in place for the current sizes.
+-- Puts the chosen mode in place for the current sizes and frames.
 local function apply()
     pending = nil
     local scale = wanted_scale()
     if mode == 'vsr' and not vsr_failed and scale ~= nil then
-        if vsr_scale == nil or math.abs(vsr_scale - scale) > 0.005 then
+        if vsr_scale == nil or math.abs(vsr_scale - scale) > 0.005 or vsr_hdr ~= hdr then
             remove_vsr()
             if add_vsr(scale) then
                 vsr_scale = scale
-                mp.msg.info(string.format('%s at %.3fx', NAMES.vsr, scale))
+                vsr_hdr = hdr
+                mp.msg.info(string.format('%s at %.3fx (%s frames)', NAMES.vsr, scale, hdr and 'HDR' or 'SDR'))
             else
                 vsr_unavailable()
             end
@@ -154,7 +161,7 @@ local function apply()
         if mode == 'vsr' and vsr_failed then want = SHADERS.fsr end
     end
     set_shaders(want)
-    mp.set_property('user-data/glasir/scaling', mode)
+    mp.set_property('user-data/app/scaling', mode)
 end
 
 -- Sizes settle over a few events (the window opening, full screen): once.
@@ -175,7 +182,7 @@ mp.register_event('log-message', function(e)
     end
 end)
 
-mp.register_script_message('glasir-scaling', function(m)
+mp.register_script_message('app-scaling', function(m)
     if not NAMES[m] then return end
     mode = m
     if m == 'vsr' then vsr_failed = not has_vsr() end
@@ -185,6 +192,15 @@ mp.register_script_message('glasir-scaling', function(m)
     else
         toast('Scaling: ' .. NAMES[m])
     end
+end)
+
+-- What the frames are from now on (the app: the console went from SDR to HDR
+-- or back, or the menu's Signal changed). The tags are the app's; this
+-- script's filters are made again for them.
+mp.register_script_message('app-signal', function(kind)
+    if kind ~= 'hdr' and kind ~= 'sdr' then return end
+    hdr = kind == 'hdr'
+    apply()
 end)
 
 -- Options changed while playing (script-opts; the tools try another VSR).
@@ -197,7 +213,7 @@ end
 
 mp.observe_property('osd-dimensions', 'native', function() soon() end)
 mp.observe_property('video-params', 'native', function() soon() end)
-mp.set_property('user-data/glasir/scaling', mode)
+mp.set_property('user-data/app/scaling', mode)
 if mode == 'vsr' and vsr_failed then
     mp.msg.warn('this GPU has no video super resolution; FSR 1 instead')
 end

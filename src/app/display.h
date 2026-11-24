@@ -4,18 +4,22 @@
 // variable refresh (G-SYNC, FreeSync, HDMI VRR). The launcher, mpv's options
 // and frame generation all decide from this instead of assuming.
 //
-// Glasir plays on one screen: glasir.ini's display.monitor, or the primary.
+// The app plays on one screen: the settings file's display.monitor, or the primary.
 // list_displays() reads them all, choose_display() picks.
 #pragma once
 #include <string>
 #include <vector>
 
-namespace glasir {
+namespace app {
 
 struct DisplayInfo {
     bool found = false;
     std::wstring name;    // the monitor's own name ("LG TV SSCR2"), "" if Windows has none
     std::wstring device;  // Windows' name for the output ("\\.\DISPLAY1")
+    // Windows' device path of the monitor plugged into it ("\\?\DISPLAY#..."),
+    // "" unknown: the output's name can pass to another monitor when screens
+    // are plugged in or switched off, this cannot.
+    std::wstring monitor_path;
     int number = 0;       // the 1 of \\.\DISPLAY1: what display.monitor = 1 means; 0: unknown
     bool primary = false;
     // Its place in Windows' list of monitors (EnumDisplayMonitors), which is
@@ -57,7 +61,7 @@ struct DisplayInfo {
     std::wstring vrr_source;
     enum class Tri { Unknown, No, Yes };
     // VRR also works for a window, not only for full screen (NVIDIA: "Enable
-    // for windowed and full screen mode"). Glasir's full screen and
+    // for windowed and full screen mode"). The app's full screen and
     // borderless modes cover the screen and get it either way; a window
     // smaller than the screen needs Yes.
     Tri vrr_windowed = Tri::Unknown;
@@ -66,8 +70,8 @@ struct DisplayInfo {
 // Every screen that is part of the desktop, the primary first, then by number.
 std::vector<DisplayInfo> list_displays();
 
-// The screen glasir.ini's display.monitor asks for: a number (the 2 of
-// \\.\DISPLAY2, as "Glasir.exe --system" lists them; Windows' display
+// The screen the settings file's display.monitor asks for: a number (the 2 of
+// \\.\DISPLAY2, as the exe's --system lists them; Windows' display
 // settings usually show the same numbers) or a part of the monitor's name
 // (any case). Empty, or nothing matches: the primary (matched says which;
 // it may be null). Null only for an empty list.
@@ -79,12 +83,21 @@ DisplayInfo primary_display();
 
 const wchar_t *vrr_name(DisplayInfo::Vrr vrr);  // "unknown", "unsupported", "supported", "on", "off"
 
-// What the add-ons inside mpv are told (GLASIR_DISPLAY_VRR): "on", "off" or
-// "unknown". user: glasir.ini's display.vrr, 1 = on, 0 = off, -1 = auto (as
+// What the add-ons inside mpv are told (env DISPLAY_VRR): "on", "off" or
+// "unknown". user: the settings file's display.vrr, 1 = on, 0 = off, -1 = auto (as
 // found: Supported is "unknown", as nothing says it is switched on).
 const wchar_t *vrr_for_addons(DisplayInfo::Vrr found, int user);
+
+// What the frame generation add-on is told about every screen of the PC
+// (env SCREENS; src/framegen/fg_screen.h has the format): Windows' name
+// for the output, its VRR state as vrr_for_addons gives it, its refresh rate,
+// the monitor's device path and a name for people ("1 (PA279CDV)"). mpv's
+// window can be moved to any of them while it runs, and the add-on goes by
+// the one it is on. chosen: the device of the screen the app plays on, the
+// only one the settings file's display.vrr (user, as above) speaks for.
+std::wstring screens_for_addons(const std::vector<DisplayInfo> &displays, const std::wstring &chosen, int user);
 
 // One line for the log and bug reports.
 std::wstring display_text(const DisplayInfo &d);
 
-}  // namespace glasir
+}  // namespace app

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MIT
-"""Checks Glasir's screenshot (the s key) end to end, without a capture card.
+"""Checks the app's screenshot (the s key) end to end, without a capture card.
 
-Pipes ffmpeg's test pattern into Glasir.exe --input-raw, makes mpv's window
+Pipes ffmpeg's test pattern into the exe's --input-raw, makes mpv's window
 wider than the picture (black bars at the sides), presses s over IPC
 (keypress runs mpv's binding) and checks what the overlay saved in
 Screenshots\\: a PNG (and a .jxr in HDR) the picture's size, without the bars.
@@ -11,7 +11,7 @@ seconds.
     python tools/screenshot_check.py
     python tools/screenshot_check.py --hdr          # 10-bit PQ: .jxr and a tone-mapped PNG
     python tools/screenshot_check.py --hdr --dlss5  # with DLSS 5 on (enabled = on: any GPU)
-    python tools/screenshot_check.py --fallback     # glasir_screenshot.lua: mpv's own shot too
+    python tools/screenshot_check.py --fallback     # screenshot.lua: mpv's own shot too
 
 The tone mapping itself is tried on game frames with shot_convert.exe
 (build\\vs\\src\\overlay\\Release): shot_convert Captures\\<when>\\f01.png OUT_FOLDER.
@@ -23,7 +23,8 @@ import subprocess
 import sys
 import time
 
-PIPE = r'\\.\pipe\glasir'
+from app_name import NAME, EXE, PIPE, APP_DIR
+
 
 
 class Mpv:
@@ -65,7 +66,7 @@ def size_of(path):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument('--app', default=os.path.join(os.path.dirname(__file__), '..', 'out', 'Glasir'))
+    p.add_argument('--app', default=APP_DIR)
     p.add_argument('--hdr', action='store_true')
     p.add_argument('--dlss5', action='store_true')
     p.add_argument('--fallback', action='store_true', help="remove the overlay's user-data first")
@@ -79,8 +80,8 @@ def main():
         ['ffmpeg', '-hide_banner', '-loglevel', 'fatal', '-re', '-f', 'lavfi', '-i', 'testsrc2=size=1280x720:rate=60',
          '-vf', f'format={"p010le" if a.hdr else "nv12"}', '-f', 'rawvideo', '-'],
         stdout=subprocess.PIPE)
-    glasir = subprocess.Popen(
-        [os.path.join(a.app, 'Glasir.exe'), '--no-dialogs', '--input-raw', '-', '--raw-format', fmt,
+    process = subprocess.Popen(
+        [os.path.join(a.app, EXE), '--no-dialogs', '--input-raw', '-', '--raw-format', fmt,
          '--set', 'capture.width=1280', '--set', 'capture.height=720', '--set', 'capture.fps=60',
          '--set', 'window.mode=windowed', '--set', f'video.mode={"hdr" if a.hdr else "sdr"}',
          '--set', f'dlss5.enabled={"on" if a.dlss5 else "off"}'],
@@ -94,9 +95,9 @@ def main():
         time.sleep(1.5)
         osd = mpv('get_property', 'osd-dimensions') or {}
         print(f"window {osd.get('w')}x{osd.get('h')}, bars {osd.get('ml')} + {osd.get('mr')} px; "
-              f"overlay: {mpv('get_property', 'user-data/glasir/screenshot')}")
+              f"overlay: {mpv('get_property', 'user-data/app/screenshot')}")
         if a.fallback:
-            mpv('del', 'user-data/glasir/screenshot')
+            mpv('del', 'user-data/app/screenshot')
         mpv('keypress', 's')
         time.sleep(4)
         try:
@@ -105,9 +106,9 @@ def main():
             pass
     finally:
         try:
-            glasir.wait(15)
+            process.wait(15)
         except subprocess.TimeoutExpired:
-            glasir.kill()
+            process.kill()
         ffmpeg.kill()
 
     new = sorted(set(os.listdir(shots)) - before) if os.path.isdir(shots) else []
@@ -129,12 +130,12 @@ def main():
     if os.path.exists(log):
         with open(log, encoding='utf-8', errors='replace') as f:
             for line in f:
-                if 'Glasir screenshot' in line:
+                if f'{NAME} screenshot' in line:
                     print('  ' + line.rstrip())
     if not a.keep:
         for f in new:
             os.remove(os.path.join(shots, f))
-    ok = ok and glasir.returncode == 0
+    ok = ok and process.returncode == 0
     print('PASS' if ok else 'FAIL')
     return 0 if ok else 1
 

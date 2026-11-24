@@ -9,7 +9,7 @@
 // that unevenness directly; this keeps each frame to its slot to within a
 // fraction of a millisecond.
 //
-//   ffmpeg ... -f rawvideo - | raw_pace.exe FRAME_BYTES FPS | Glasir.exe --input-raw - ...
+//   ffmpeg ... -f rawvideo - | raw_pace.exe FRAME_BYTES FPS | <the exe> --input-raw - ...
 
 #include <windows.h>
 #include <timeapi.h>

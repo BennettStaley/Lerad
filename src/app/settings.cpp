@@ -10,9 +10,12 @@
 #include <vector>
 
 #include "../common/ini_edit.h"
+#include "../common/keep_regions.h"
+#include "app_version.h"
+#include "carry_over.h"
 #include "log.h"
 
-namespace glasir {
+namespace app {
 namespace {
 
 std::wstring trim(const std::wstring &s) {
@@ -57,7 +60,7 @@ bool apply(Settings &s, const std::wstring &section, const std::wstring &key, co
            std::wstring &error) {
     const std::wstring name = section + L"." + key;
     auto bad = [&](const wchar_t *expected) {
-        error = L"glasir.ini: " + name + L" = " + value + L" (expected " + expected + L")";
+        error = APP_INI_W L": " + name + L" = " + value + L" (expected " + expected + L")";
         return false;
     };
     long n = 0;
@@ -80,6 +83,9 @@ bool apply(Settings &s, const std::wstring &section, const std::wstring &key, co
         else if (l == L"mediafoundation") s.path = Settings::CapturePath::MediaFoundation;
         else if (l == L"directshow") s.path = Settings::CapturePath::DirectShow;
         else return bad(L"auto, mediafoundation or directshow");
+    } else if (name == L"capture.low_latency") {
+        if (!parse_bool(value, b)) return bad(L"1 or 0");
+        s.low_latency = b;
     } else if (name == L"video.mode") {
         const std::wstring l = lower(value);
         if (l == L"sdr") s.hdr = false, s.hdr_auto = false;
@@ -153,6 +159,12 @@ bool apply(Settings &s, const std::wstring &section, const std::wstring &key, co
     } else if (name == L"framegen.multiplier") {
         if (!parse_int(value, 2, 4, n)) return bad(L"2, 3 or 4");
         s.framegen_multiplier = int(n);
+    } else if (name == L"framegen.keep") {
+        std::vector<KeepRegion> regions;
+        if (!parse_keep_regions(narrow(value), regions))
+            return bad(L"areas like r:2,80,20,15;e:85,5,12,20,hud (r or e, then left, top, width, height in percent, "
+                       L"and ,hud for an area kept only where a HUD is found; at most 8)");
+        s.framegen_keep = widen(format_keep_regions(regions));
     } else if (name == L"framegen.show_rates") {
         if (!parse_bool(value, b)) return bad(L"1 or 0");
         s.framegen_show_rates = b;
@@ -165,6 +177,12 @@ bool apply(Settings &s, const std::wstring &section, const std::wstring &key, co
     } else if (name == L"frames.dedup_keepalive_ms") {
         if (!parse_int(value, 0, 60000, n)) return bad(L"0 to 60000");
         s.dedup_keepalive_ms = DWORD(n);
+    } else if (name == L"frames.every_frame") {
+        const std::wstring l = lower(value);
+        if (l == L"auto") s.every_frame = Settings::EveryFrame::Auto;
+        else if (l == L"on" || l == L"1") s.every_frame = Settings::EveryFrame::On;
+        else if (l == L"off" || l == L"0") s.every_frame = Settings::EveryFrame::Off;
+        else return bad(L"auto, on or off");
     } else if (name == L"framegen.enabled") {
         if (!parse_bool(value, b)) return bad(L"1 or 0");
         s.framegen = b;
@@ -173,6 +191,18 @@ bool apply(Settings &s, const std::wstring &section, const std::wstring &key, co
         if (l == L"high") s.framegen_fast = false;
         else if (l == L"fast") s.framegen_fast = true;
         else return bad(L"high or fast");
+    } else if (name == L"framegen.backend") {
+        // "own"; and what the app's own generator was called before, the
+        // app's name then or now, so older files load (carry_over.h).
+        const std::wstring l = lower(value);
+        if (l != L"own" && l != L"dlss" && l != L"video" && l != L"anr" && !was_own_backend(narrow(l)))
+            return bad(L"own, dlss, video or anr");
+        s.framegen_dlss = l == L"dlss";
+        s.framegen_video = l == L"video";
+        s.framegen_anr = l == L"anr";
+    } else if (name == L"framegen.hud") {
+        if (!parse_bool(value, b)) return bad(L"1 or 0");
+        s.framegen_hud = b;
     } else if (name == L"framegen.all_frames_when_off") {
         if (!parse_bool(value, b)) return bad(L"1 or 0");
         s.all_frames_when_off = b;
@@ -210,17 +240,40 @@ bool apply(Settings &s, const std::wstring &section, const std::wstring &key, co
     } else if (name == L"window.skip_black_bars") {
         if (!parse_bool(value, b)) return bad(L"1 or 0");
         s.skip_black_bars = b;
+    } else if (name == L"stream.window") {
+        if (!parse_bool(value, b)) return bad(L"1 or 0");
+        s.stream_window = b;
+    } else if (name == L"stream.brightness") {
+        if (!parse_int(value, 40, 160, n)) return bad(L"40 to 160");
+        s.stream_brightness = int(n);
+    } else if (name == L"input.mouse_keyboard") {
+        if (!parse_bool(value, b)) return bad(L"1 or 0");
+        s.input = b;
+    } else if (name == L"input.program") {
+        s.input_program = value;
+    } else if (name == L"input.sensitivity") {
+        if (!parse_int(value, 5, 100, n)) return bad(L"5 to 100");
+        s.input_sensitivity = int(n);
+    } else if (name == L"input.aim_sensitivity") {
+        if (!parse_int(value, 20, 200, n)) return bad(L"20 to 200");
+        s.input_aim_sensitivity = int(n);
+    } else if (name == L"input.mouse_forward") {
+        if (!parse_bool(value, b)) return bad(L"1 or 0");
+        s.input_forward = b;
+    } else if (name == L"input.lead_ms") {
+        if (!parse_int(value, 0, 300, n)) return bad(L"0 to 300");
+        s.input_lead_ms = int(n);
     } else if (name == L"launcher.show") {
         if (!parse_bool(value, b)) return bad(L"1 or 0");
         s.show_launcher = b;
     } else if (name == L"update.check") {
-        if (!parse_bool(value, b)) return bad(L"1 or 0");
-        s.update_check = b;
+        // From before: this build does not look for updates. Read and ignored,
+        // so an older settings file still loads.
     } else if (name == L"debug.mpv_log") {
         if (!parse_bool(value, b)) return bad(L"1 or 0");
         s.mpv_log = b;
     } else {
-        log(L"glasir.ini: unknown setting {}, skipped", name);
+        log(APP_INI_W L": unknown setting {}, skipped", name);
     }
     return true;
 }
@@ -252,6 +305,14 @@ const wchar_t *hdr_output_name(Settings::HdrOutput output) {
     }
 }
 
+const wchar_t *every_frame_name(Settings::EveryFrame every) {
+    switch (every) {
+    case Settings::EveryFrame::On: return L"on";
+    case Settings::EveryFrame::Off: return L"off";
+    default: return L"auto";
+    }
+}
+
 const wchar_t *vrr_setting_name(Settings::Vrr vrr) {
     switch (vrr) {
     case Settings::Vrr::On: return L"on";
@@ -261,29 +322,34 @@ const wchar_t *vrr_setting_name(Settings::Vrr vrr) {
 }
 
 const char *default_settings_text() {
-    return R"(; Glasir settings. Lines starting with ; are comments.
+    return R"(; )" APP_NAME R"( settings. Lines starting with ; are comments.
 ; A missing file is recreated with these defaults.
 
 [capture]
-; The card's name as "Glasir.exe --list" shows it. Empty: pick automatically.
+; The card's name as ")" APP_EXE R"( --list" shows it. Empty: pick automatically.
 device =
 ; Capture size and rate. 0: automatic (60 fps if offered, the largest size
-; that fits the screen Glasir plays on).
+; that fits the screen )" APP_NAME R"( plays on).
 width = 0
 height = 0
 fps = 0
 ; auto: Media Foundation if the card offers a usable mode, else DirectShow.
 ; DirectShow works with more cards but has no dedup or frame generation.
 path = auto
+; A Magewell Pro Capture card's low latency mode: it passes a frame on
+; while it is still coming in, a few milliseconds sooner and more evenly
+; timed. 1: switched on before capturing. 0: switched off. The card's driver
+; keeps what is set, also for other programs. Other cards: nothing.
+low_latency = 1
 
 [video]
-; auto, sdr or hdr. auto: Glasir captures in the card's 10-bit (P010) mode,
+; auto, sdr or hdr. auto: )" APP_NAME R"( captures in the card's 10-bit (P010) mode,
 ; tells from the picture whether the console sends SDR or HDR, and follows it
 ; when that changes (the picture starts again); a card without a 10-bit mode
 ; is SDR. sdr and hdr say it yourself: hdr needs a 10-bit mode and HDR on the
 ; console, sdr also offers the card's 8-bit modes (often larger or faster).
 mode = auto
-; What auto found the last time (Glasir writes this): how it starts.
+; What auto found the last time ()" APP_NAME R"( writes this): how it starts.
 auto_found = hdr
 ; The SDR signal's range: limited (most consoles) or full.
 sdr_range = limited
@@ -306,7 +372,7 @@ scaling = mpv
 output = auto
 ; HDR to the screen. 0: the picture goes out as the console sends it, as it
 ; would over a cable; set the console's HDR calibration while playing through
-; Glasir and it fits this screen. 1: Glasir fits the picture to the screen's
+; )" APP_NAME R"( and it fits this screen. 1: )" APP_NAME R"( fits the picture to the screen's
 ; peak brightness itself (for a console that cannot be calibrated to this
 ; screen: highlights that clip to white, or a picture that is too dim).
 fit_to_screen = 0
@@ -328,13 +394,13 @@ dynamic_peak = 0
 paper_white_nits = 0
 
 [display]
-; The screen Glasir plays on: its number (1, 2: as "Glasir.exe --system" lists
+; The screen )" APP_NAME R"( plays on: its number (1, 2: as ")" APP_EXE R"( --system" lists
 ; the screens, usually the numbers of Windows' display settings) or a part of
 ; its name. Empty: the main screen. The automatic capture size, HDR, the
 ; refresh rate and VRR all go by this screen.
 monitor =
 ; Variable refresh rate (G-SYNC, FreeSync, HDMI VRR) on that screen.
-; auto: as Glasir finds it ("Glasir.exe --system" says what it found and
+; auto: as )" APP_NAME R"( finds it (")" APP_EXE R"( --system" says what it found and
 ; how; with an AMD or Intel GPU it can read what the screen can do, not
 ; whether it is switched on). on / off: if you know better.
 vrr = auto
@@ -353,6 +419,16 @@ dedup = 1
 dedup_threshold = 3
 ; A still picture is still sent this often (ms), so menus keep drawing.
 dedup_keepalive_ms = 200
+; Take every captured frame as a new game frame, without comparing pictures,
+; so a still picture (a menu) keeps the same even rate as the game.
+; auto: when the capture runs at 30 fps or less, which a 30 fps game fills
+; (if the card sends more frames than its mode says, they are compared).
+; A faster capture (59.94) is still compared, but once the game's rhythm is
+; clear (every frame new, or every other one) it is kept while the picture
+; hardly moves, instead of guessing frame by frame.
+; on: always (a game slower than the capture then shows its repeats).
+; off: always compare pictures, frame by frame.
+every_frame = auto
 
 [framegen]
 ; 1: frame generation adds frames between the game's (30 -> 60, 60 -> 120)
@@ -360,7 +436,18 @@ dedup_keepalive_ms = 200
 ; while playing; the menu (Tab) switches it and keeps the choices here, and
 ; says what is shown and why when it is less than asked for.
 enabled = 1
-; high, or fast (about half the GPU time, a little less clean).
+; What makes the frames in between. own: )" APP_NAME R"('s own, on any GPU.
+; dlss: NVIDIA DLSS Frame Generation (GeForce RTX 40 series and newer, with
+; nvngx_dlssg.dll in the engine folder); )" APP_NAME R"('s own where it cannot run.
+; video: NVIDIA Video Frame Generation, made for video without a game's
+; motion vectors (an RTX 40 or 50; its files are a download of their own,
+; under NVIDIA's licences: the About tab).
+; anr: Apex Neural Rendering's frame generation (a beta by Apex Compute, any
+; GPU it knows; a download on the About tab), on the motion )" APP_NAME R"(
+; finds in the pictures.
+backend = own
+; high, or fast (about half the GPU time, a little less clean). )" APP_NAME R"('s own
+; frames only.
 quality = high
 ; motion: the frame in between follows what moves (the default). blend: a
 ; plain mix of the two frames (the lightest; moving things show double).
@@ -368,10 +455,25 @@ method = motion
 ; Frames shown per game frame, at most: 2 (one frame in between), 3 or 4
 ; (two or three: 30 -> 90 or 120 on a fast screen). More costs GPU time for
 ; each added frame and shows the game's own frame later (half a game frame
-; at 2, two thirds at 3, three quarters at 4). Glasir uses the most that
+; at 2, two thirds at 3, three quarters at 4). )" APP_NAME R"( uses the most that
 ; fits the screen: with 4 on a 120 Hz screen, a 30 fps game is shown at 120
 ; and a 60 fps game at 120 (x2).
 multiplier = 2
+; Areas frame generation leaves alone (a HUD, a map, subtitles): a frame in
+; between shows the game's own frame there, so small text stays sharp. Each
+; is r (a rectangle) or e (an ellipse), then left, top, width and height in
+; percent of the picture; several with ; between them, at most 8. The menu
+; (Tab) has an editor that shows them on the picture. With ,hud after its
+; numbers an area only says where to look: the game's own frame is shown
+; where a HUD is found in it (what stands still while the scenery moves),
+; and the scenery beside and through the HUD is still generated. Example:
+; keep = r:2,80,20,15;e:85,5,12,20,hud
+keep =
+; 1: find the HUD everywhere, with no area drawn: a frame in between shows
+; the game's own frame wherever something has stood still for a few frames
+; while the scenery behind it moved. A HUD that moves or fades is not found
+; (draw an area for it); costs a little GPU time once per game frame.
+hud = 0
 ; Frames are only added while the result stays at or under this many a
 ; second. 0: the screen's refresh rate. With VRR, a value under the screen's
 ; rate keeps the result inside the VRR range: 100 on a 120 Hz screen shows a
@@ -421,15 +523,43 @@ mode = borderless
 ; frame generation falls short of double: check the menu's fps.
 skip_black_bars = 0
 
+[stream]
+; A second, ordinary window (2560x1440, SDR) with a live copy of the picture,
+; on a screen other than the one played on: what to share in Discord or OBS
+; while the picture itself stays HDR. The menu (Tab) switches it while
+; playing; closing that window switches it off.
+window = 0
+; How bright an HDR picture is in that window, in percent (40 to 160). 100
+; shows HDR's reference white (203 nits) as the SDR white; lower is darker.
+; An SDR picture is shown as it is.
+brightness = 80
+
+[input]
+; 1: play the console with this PC's mouse and keyboard. The input program
+; below is started with the picture and ended with it. It is a separate
+; program, not part of this one.
+mouse_keyboard = 0
+; The input program's file. From this folder unless it is a full path.
+program =
+; The mouse (5 to 100): how far the view turns for a movement of the mouse.
+; The menu (Tab) changes it while playing.
+sensitivity = 30
+; The same while aiming down the sights, in percent of the above (20 to 200).
+aim_sensitivity = 100
+; 1: the picture moves with the mouse at once, ahead of the console, which
+; shows a turn of the view only a moment later; as its frames arrive the
+; picture is where it already was. Needs the input program's measurement of
+; the game's turning.
+mouse_forward = 1
+; How long the console takes to show a turn, in milliseconds (0 to 300): the
+; picture is moved ahead by that much. Too high and the view swings past and
+; comes back; too low and it trails.
+lead_ms = 140
+
 [launcher]
-; 1: Glasir.exe opens its window first (card, picture, enhancements, sound).
+; 1: )" APP_EXE R"( opens its window first (card, picture, enhancements, sound).
 ; 0: it plays at once; hold Shift while starting it to see the window.
 show = 1
-
-[update]
-; 1: the window asks GitHub (github.com/Abhito/Glasir) whether a newer Glasir
-; is out, and offers to install it. Nothing is installed unasked.
-check = 1
 
 [debug]
 ; 1: mpv writes a detailed log to logs\mpv.log.
@@ -459,7 +589,7 @@ bool load_settings(const std::wstring &path, Settings &s, std::wstring &error) {
         if (line.empty() || line[0] == L';' || line[0] == L'#') continue;
         if (line.front() == L'[') {
             if (line.back() != L']') {
-                error = L"glasir.ini line " + std::to_wstring(number) + L": " + line;
+                error = APP_INI_W L" line " + std::to_wstring(number) + L": " + line;
                 return false;
             }
             section = lower(trim(line.substr(1, line.size() - 2)));
@@ -467,7 +597,7 @@ bool load_settings(const std::wstring &path, Settings &s, std::wstring &error) {
         }
         const size_t eq = line.find(L'=');
         if (eq == std::wstring::npos) {
-            error = L"glasir.ini line " + std::to_wstring(number) + L": " + line + L" (expected key = value)";
+            error = APP_INI_W L" line " + std::to_wstring(number) + L": " + line + L" (expected key = value)";
             return false;
         }
         std::wstring value = line.substr(eq + 1);
@@ -529,6 +659,7 @@ std::vector<SettingValue> changed_settings(const Settings &from, const Settings 
         put(L"capture", L"fps", number(to.fps));
     }
     if (to.path != from.path) put(L"capture", L"path", path_name(to.path));
+    if (to.low_latency != from.low_latency) put(L"capture", L"low_latency", flag(to.low_latency));
     if (to.hdr_auto != from.hdr_auto || (!to.hdr_auto && to.hdr != from.hdr))
         put(L"video", L"mode", to.hdr_auto ? L"auto" : to.hdr ? L"hdr" : L"sdr");
     if (to.sdr_full_range != from.sdr_full_range) put(L"video", L"sdr_range", to.sdr_full_range ? L"full" : L"limited");
@@ -550,13 +681,20 @@ std::vector<SettingValue> changed_settings(const Settings &from, const Settings 
         put(L"frames", L"dedup_threshold", std::to_wstring(to.dedup_threshold));
     if (to.dedup_keepalive_ms != from.dedup_keepalive_ms)
         put(L"frames", L"dedup_keepalive_ms", std::to_wstring(to.dedup_keepalive_ms));
+    if (to.every_frame != from.every_frame) put(L"frames", L"every_frame", every_frame_name(to.every_frame));
     if (to.framegen != from.framegen) put(L"framegen", L"enabled", flag(to.framegen));
     if (to.framegen_fast != from.framegen_fast) put(L"framegen", L"quality", to.framegen_fast ? L"fast" : L"high");
     if (to.framegen_blend != from.framegen_blend) put(L"framegen", L"method", to.framegen_blend ? L"blend" : L"motion");
+    if (to.framegen_dlss != from.framegen_dlss || to.framegen_video != from.framegen_video ||
+        to.framegen_anr != from.framegen_anr)
+        put(L"framegen", L"backend",
+            to.framegen_video ? L"video" : to.framegen_anr ? L"anr" : to.framegen_dlss ? L"dlss" : L"own");
     if (to.framegen_multiplier != from.framegen_multiplier)
         put(L"framegen", L"multiplier", std::to_wstring(to.framegen_multiplier));
     if (to.framegen_max_hz != from.framegen_max_hz)
         put(L"framegen", L"max_output_hz", std::to_wstring(to.framegen_max_hz));
+    if (to.framegen_keep != from.framegen_keep) put(L"framegen", L"keep", to.framegen_keep);
+    if (to.framegen_hud != from.framegen_hud) put(L"framegen", L"hud", flag(to.framegen_hud));
     if (to.framegen_show_rates != from.framegen_show_rates)
         put(L"framegen", L"show_rates", flag(to.framegen_show_rates));
     if (to.all_frames_when_off != from.all_frames_when_off)
@@ -572,8 +710,18 @@ std::vector<SettingValue> changed_settings(const Settings &from, const Settings 
     if (to.borderless != from.borderless || to.fullscreen != from.fullscreen)
         put(L"window", L"mode", window_mode(to));
     if (to.skip_black_bars != from.skip_black_bars) put(L"window", L"skip_black_bars", flag(to.skip_black_bars));
+    if (to.stream_window != from.stream_window) put(L"stream", L"window", flag(to.stream_window));
+    if (to.stream_brightness != from.stream_brightness)
+        put(L"stream", L"brightness", std::to_wstring(to.stream_brightness));
+    if (to.input != from.input) put(L"input", L"mouse_keyboard", flag(to.input));
+    if (to.input_program != from.input_program) put(L"input", L"program", to.input_program);
+    if (to.input_sensitivity != from.input_sensitivity)
+        put(L"input", L"sensitivity", std::to_wstring(to.input_sensitivity));
+    if (to.input_aim_sensitivity != from.input_aim_sensitivity)
+        put(L"input", L"aim_sensitivity", std::to_wstring(to.input_aim_sensitivity));
+    if (to.input_forward != from.input_forward) put(L"input", L"mouse_forward", flag(to.input_forward));
+    if (to.input_lead_ms != from.input_lead_ms) put(L"input", L"lead_ms", std::to_wstring(to.input_lead_ms));
     if (to.show_launcher != from.show_launcher) put(L"launcher", L"show", flag(to.show_launcher));
-    if (to.update_check != from.update_check) put(L"update", L"check", flag(to.update_check));
     if (to.mpv_log != from.mpv_log) put(L"debug", L"mpv_log", flag(to.mpv_log));
     return v;
 }
@@ -589,4 +737,4 @@ bool apply_override(Settings &s, const std::wstring &assignment, std::wstring &e
                  trim(assignment.substr(eq + 1)), error);
 }
 
-}  // namespace glasir
+}  // namespace app

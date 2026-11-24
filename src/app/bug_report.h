@@ -1,19 +1,21 @@
 // SPDX-License-Identifier: MIT
 // "Save a bug report": one zip with what is needed to see what went wrong -
-// the logs, the settings (glasir.ini, ReShade's, DLSS 5's), what is
+// the logs, the settings (the settings file, ReShade's, DLSS 5's), what is
 // installed, the PC (Windows, GPUs and their drivers, the screens) and, when
-// it is made with F9 while playing, the frames frame generation saved then.
+// it is made with F9 while playing, small pictures (frame_preview.h) of the
+// frames frame generation saved then. The frames themselves stay in
+// Captures\: they are about 100 MB, and an issue takes 25 MB.
 // Paths in it have the user's profile folder replaced by %USERPROFILE%, so
 // the Windows user name is not in it.
 #pragma once
 #include <string>
 
-namespace glasir {
+namespace app {
 
 struct BugReportInput {
-    std::wstring app_dir;        // Glasir.exe's folder
-    std::wstring settings_path;  // glasir.ini
-    std::wstring frames;         // a Captures\<date-time> folder to add, "" for none
+    std::wstring app_dir;        // the exe's folder
+    std::wstring settings_path;  // the settings file
+    std::wstring frames;         // a Captures\<date-time> folder to add pictures of, "" for none
     std::wstring how;            // how it was made, for system.txt ("F9 while playing")
     std::wstring extra;          // more for system.txt (the capture cards)
 };
@@ -28,4 +30,4 @@ std::wstring system_summary();
 // replaced by %USERPROFILE%, whatever its case.
 std::string redact_profile(const std::string &text, const std::wstring &profile);
 
-}  // namespace glasir
+}  // namespace app

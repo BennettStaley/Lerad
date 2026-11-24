@@ -5,13 +5,15 @@
 #include <string>
 #include <vector>
 
+#include "app_version.h"
 #include "display.h"
 #include "gpu.h"
 #include "mpv_launch.h"
 #include "settings.h"
+#include "stream_link.h"
 #include "vrr.h"
 
-using namespace glasir;
+using namespace app;
 
 namespace {
 
@@ -77,7 +79,7 @@ int main() {
     using Vrr = DisplayInfo::Vrr;
     using Tri = DisplayInfo::Tri;
     {
-        // The screen glasir.ini asks for.
+        // The screen the settings file asks for.
         const std::vector<DisplayInfo> two = {screen(2, L"Odyssey G95SC", true), screen(1, L"PA279CDV", false)};
         bool matched = false;
         expect(choose_display(two, L"", &matched)->number == 2 && matched, "no display.monitor: the primary");
@@ -104,6 +106,23 @@ int main() {
                "the screen can but nothing says it is on: unknown, not a guess");
         expect(std::wstring(vrr_for_addons(Vrr::Off, 1)) == L"on" && std::wstring(vrr_for_addons(Vrr::On, 0)) == L"off",
                "display.vrr = on / off wins over what was found");
+        // Every screen, for frame generation, which goes by the one the
+        // window is on (src/framegen/fg_screen.h reads this).
+        std::vector<DisplayInfo> two = {screen(2, L"Odyssey G95SC", true), screen(1, L"PA279CDV", false)};
+        two[0].refresh_hz = 239.76, two[0].vrr = Vrr::Supported;
+        two[1].refresh_hz = 119.88, two[1].vrr = Vrr::Off;
+        expect(screens_for_addons(two, L"\\\\.\\DISPLAY1", -1) ==
+                   L"\\\\.\\DISPLAY2|unknown|239.760||2 (Odyssey G95SC);\\\\.\\DISPLAY1|off|119.880||1 (PA279CDV)",
+               "every screen with its own VRR state and rate");
+        expect(screens_for_addons(two, L"\\\\.\\DISPLAY1", 1) ==
+                   L"\\\\.\\DISPLAY2|unknown|239.760||2 (Odyssey G95SC);\\\\.\\DISPLAY1|on|119.880||1 (PA279CDV)",
+               "display.vrr = on speaks for the screen " APP_NAME " plays on, not the other");
+        two[1].name = L"A|B;C";
+        two[1].monitor_path = L"\\\\?\\DISPLAY#AUS2704#5&1a2b3c&0&UID4352#{e6f07b5f-ee97-4a90-b076-33f57bf4eaa7}";
+        expect(screens_for_addons(two, L"", -1).ends_with(
+                   L"|\\\\?\\DISPLAY#AUS2704#5&1a2b3c&0&UID4352#{e6f07b5f-ee97-4a90-b076-33f57bf4eaa7}|1 (A B C)"),
+               "the monitor's own path goes along; a name cannot break the list apart");
+        expect(screens_for_addons({}, L"", -1).empty(), "no screens: nothing told");
     }
     {
         // The GPU mpv draws on.
@@ -304,6 +323,30 @@ int main() {
                "display.monitor: mpv's --screen and --fs-screen by Windows' monitor order; the GPU by name");
         plan.display.enum_index = -1;
         expect(!starts(mpv_arguments(plan, s), L"--screen="), "the monitor's place unknown: mpv is not told a screen");
+    }
+    {
+        // The stream window: which screen it opens on, and the size that fits.
+        using app::stream::pick_monitor;
+        expect(pick_monitor(2, 0, 1) == 1, "stream window: the main screen when the picture is on the other");
+        expect(pick_monitor(2, 1, 1) == 0, "stream window: never the picture's screen, also when that is the main one");
+        expect(pick_monitor(3, 0, 0) == 1, "stream window: the first other screen");
+        expect(pick_monitor(3, 2, -1) == 0, "stream window: no main screen told: the first other");
+        expect(pick_monitor(1, 0, 0) == 0, "stream window: one screen only: that one");
+        expect(pick_monitor(2, -1, 1) == 1, "stream window: the picture's screen unknown: the main one");
+        expect(pick_monitor(0, 0, 0) == -1, "stream window: no screen");
+        int w = 0, h = 0;
+        app::stream::fit(5120, 1440, w, h);
+        expect(w == 2560 && h == 1440, "stream window: 2560 x 1440 where it fits");
+        app::stream::fit(5104, 1361, w, h);
+        expect(h == 1361 && w == 2419, "stream window: the same shape, smaller, under a title bar and a taskbar");
+        app::stream::fit(1920, 1040, w, h);
+        expect(w == 1848 && h == 1040, "stream window: fitted to a 1080-line screen by its height");
+        app::stream::fit(1280, 1400, w, h);
+        expect(w == 1280 && h == 720, "stream window: fitted by its width");
+        Settings s;
+        std::wstring error;
+        expect(!s.stream_window && apply_override(s, L"stream.window=1", error) && s.stream_window,
+               "stream.window: off unless asked for");
     }
 
     std::printf("%s\n", g_failures ? "FAILED" : "all passed");

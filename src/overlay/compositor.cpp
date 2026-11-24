@@ -7,7 +7,7 @@
 #include "composite_ps.h"
 #include "composite_vs.h"
 
-namespace glasir::overlay {
+namespace app::overlay {
 
 StateBackup::StateBackup(ID3D11DeviceContext *c) : c_(c) {
     c->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, rtvs_, &dsv_);
@@ -177,4 +177,4 @@ bool Compositor::composite(ID3D11DeviceContext *context, ID3D11Texture2D *back_b
     return true;
 }
 
-}  // namespace glasir::overlay
+}  // namespace app::overlay

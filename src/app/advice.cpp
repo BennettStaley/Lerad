@@ -6,10 +6,11 @@
 #include <format>
 #include <optional>
 
+#include "app_version.h"
 #include "fg_pacing.h"
 #include "log.h"
 
-namespace glasir {
+namespace app {
 namespace {
 
 using Vrr = DisplayInfo::Vrr;
@@ -18,7 +19,8 @@ std::wstring number(double v) {
     return std::fabs(v - std::round(v)) < 0.05 ? std::format(L"{:.0f}", v) : std::format(L"{:.2f}", v);
 }
 
-std::wstring size_text(const VideoMode &m) { return std::format(L"{}x{}", m.width, m.height); }
+// Figures are written one way everywhere: 3840 x 2160, 59.94 fps, 120 Hz, x4.
+std::wstring size_text(const VideoMode &m) { return std::format(L"{} x {}", m.width, m.height); }
 std::wstring mode_text(const VideoMode &m) { return size_text(m) + L" at " + number(m.fps) + L" fps"; }
 
 bool sdr_format(const VideoMode &m) { return m.supported && m.format != PixelFormat::P010; }
@@ -37,7 +39,7 @@ std::optional<VideoMode> largest(const std::vector<VideoMode> &modes, Pred pass)
     return best;
 }
 
-// What glasir.ini has now for a key advise() may suggest.
+// What the settings file has now for a key advise() may suggest.
 std::wstring current(const Settings &s, const SettingValue &v) {
     const std::wstring name = v.section + L"." + v.key;
     if (name == L"capture.width") return std::to_wstring(s.width);
@@ -110,17 +112,21 @@ Advice advise(const AdviceInput &in) {
     auto recommend = [&](const char *id, std::wstring text, std::vector<SettingValue> suggest) {
         add(id, AdviceKind::Recommendation, Sev::Info, std::move(text), std::move(suggest));
     };
-    const std::wstring card = in.card.empty() ? L"The capture card" : L"\"" + in.card + L"\"";
+    // The texts are read in the launcher, beside the controls they are
+    // about: they say what happens, then why, then what to do, and name a
+    // control by its label and tab, never a key of the settings file or a
+    // command line (advice_text adds those for --system).
+    const std::wstring card = L"This card";
 
     // ------------------------------------------------------------ the screen
     // monitor-not-found: display.monitor names no screen.
     if (!in.monitor_matched && !s.monitor.empty())
         limit("monitor-not-found", Sev::Warning,
-              L"display.monitor = " + s.monitor + L" names no screen of this PC: Glasir plays on the main screen. "
-              L"\"Glasir.exe --system\" lists the screens.");
+              APP_NAME_W L" plays on the main screen: the screen chosen before (\"" + s.monitor +
+                  L"\") is not on this PC. Choose one under Play on (Screen tab).");
 
     // ------------------------------------------------------------ the capture
-    // The mode, picked as Glasir.exe does when it plays (main.cpp open_source).
+    // The mode, picked as the exe does when it plays (main.cpp open_source).
     ModeRequest request;
     request.hdr = picture.ten_bit;
     request.width = s.width;
@@ -147,7 +153,7 @@ Advice advise(const AdviceInput &in) {
     const auto best_hdr60 = largest(in.modes, [](const VideoMode &m) { return hdr_format(m) && rate60(m); });
     const bool asked = s.width || s.height || s.fps > 0;
     const std::wstring asked_text =
-        (s.width && s.height ? std::format(L"{}x{}", s.width, s.height) : std::wstring(L"any size")) +
+        (s.width && s.height ? std::format(L"{} x {}", s.width, s.height) : std::wstring(L"any size")) +
         (s.fps > 0 ? L" at " + number(s.fps) + L" fps" : L"");
 
     if (!in.card_found) {
@@ -155,37 +161,38 @@ Advice advise(const AdviceInput &in) {
         limit("no-card", Sev::Problem,
               s.device.empty() ? std::wstring(L"No capture card was found. Check that it is plugged in and its driver "
                                               L"is installed.")
-                               : L"The capture card \"" + s.device + L"\" from glasir.ini was not found.");
+                               : L"The capture card chosen before (\"" + s.device +
+                                     L"\") was not found. Plug it in, or choose another under Capture card (Play tab).");
     } else if (!mode && s.hdr && !best_hdr) {
         // capture-no-hdr-mode: HDR asked of a card without a 10-bit mode.
         limit("capture-no-hdr-mode", Sev::Problem,
-              card + L" has no 10-bit mode (P010), so it cannot capture HDR. Use SDR.",
+              card + L" cannot capture HDR: it has no 10-bit mode. Set Signal to SDR (Play tab).",
               {{L"video", L"mode", L"sdr"}});
     } else if (!mode && !in.modes.empty()) {
         // capture-no-mode: the size and rate asked for are not offered.
         limit("capture-no-mode", Sev::Problem,
               card + L" has no " + (picture.ten_bit ? L"HDR" : L"SDR") + L" mode of " + asked_text +
-                  L". Automatic (0) picks one it has.",
+                  L". Set Capture mode to Automatic (Play tab), which picks one it has.",
               {{L"capture", L"width", L"0"}, {L"capture", L"height", L"0"}, {L"capture", L"fps", L"0"}});
     } else if (!o.media_foundation) {
         // capture-directshow: the fallback path and what it loses.
         limit("capture-directshow", Sev::Warning,
-              card + L" is opened through DirectShow" +
-                  (s.path == Settings::CapturePath::DirectShow ? L" (capture.path = directshow)"
-                                                               : L" (it has no mode Glasir can read itself)") +
-                  L": no frame generation, and repeated frames are not dropped.");
+              card + L" runs in basic mode: no frame generation, and repeated frames are not dropped. " +
+                  (s.path == Settings::CapturePath::DirectShow
+                       ? L"Basic mode is chosen under Advanced (About tab)."
+                       : APP_NAME_W L" found no mode of it that it can read itself."));
     }
 
     // card-hdr-limit / card-no-hdr: what the card's HDR modes reach.
     if (in.card_found && best_sdr && !best_hdr) {
-        if (!s.hdr) limit("card-no-hdr", Sev::Info, card + L" has no 10-bit mode: SDR only.");
+        if (!s.hdr) limit("card-no-hdr", Sev::Info, card + L" captures SDR only: it has no 10-bit mode.");
     } else if (best_sdr && best_hdr) {
         const VideoMode &top = best_hdr60 ? *best_hdr60 : *best_hdr;
         const bool less = area(top) < area(*best_sdr) || top.fps + 1 < best_sdr->fps;
         if (less) {
-            std::wstring text = card + L" has HDR only up to " + mode_text(top);
+            std::wstring text = L"HDR goes up to " + mode_text(top);
             if (best_hdr60 && area(*best_hdr) > area(*best_hdr60)) text += L" (" + mode_text(*best_hdr) + L" too)";
-            limit("card-hdr-limit", Sev::Info, text + L"; SDR goes up to " + mode_text(*best_sdr) + L".");
+            limit("card-hdr-limit", Sev::Info, text + L"; SDR up to " + mode_text(*best_sdr) + L".");
         }
     }
 
@@ -209,8 +216,8 @@ Advice advise(const AdviceInput &in) {
         if (pick && d.found && int(mode->height) > d.height && pick->height < mode->height) {
             // capture-larger-than-screen: more pixels than the screen has.
             limit("capture-larger-than-screen", Sev::Warning,
-                  std::format(L"The capture ({}) is larger than the screen ({}x{}): it is scaled down again, and "
-                              L"moves {:.1f} GB/s for nothing. {} looks the same.",
+                  std::format(L"The capture ({}) is larger than the screen ({} x {}): it is scaled down again, and "
+                              L"moves {:.1f} GB a second for nothing. {} looks the same.",
                               size_text(*mode), d.width, d.height, o.raw_gb_per_s, mode_text(*pick)),
                   capture_settings(*pick));
         } else if (pick && !same && !rate60(*mode) && rate60(*pick)) {
@@ -257,15 +264,15 @@ Advice advise(const AdviceInput &in) {
         // raw-data-rate: a lot of bytes through the pipe.
         if (o.raw_gb_per_s >= 1.0)
             limit("raw-data-rate", Sev::Info,
-                  std::format(L"Raw {} frames are {:.1f} GB/s through the pipe to mpv. If frames are lost "
-                              L"(logs\\glasir.log says \"mpv fell behind\"), capture smaller or slower.",
-                              mode_text(*mode), o.raw_gb_per_s));
+                  std::format(L"This mode moves {:.1f} GB of picture a second. If frames are lost, pick a smaller or "
+                              L"slower mode.",
+                              o.raw_gb_per_s));
     }
 
     // ------------------------------------------------------------ frame rates
     const double capture_fps = mode ? mode->fps : 60.0;
     const double refresh = d.found ? d.refresh_hz : 0;
-    // Variable refresh as the add-ons are told it (glasir.ini's display.vrr,
+    // Variable refresh as the add-ons are told it (the settings file's display.vrr,
     // else as found): frame generation's choices below go by the same word.
     const int vrr_user = s.vrr == Settings::Vrr::On ? 1 : s.vrr == Settings::Vrr::Off ? 0 : -1;
     o.vrr = vrr_for_addons(d.found ? d.vrr : Vrr::Unknown, vrr_user);
@@ -306,13 +313,31 @@ Advice advise(const AdviceInput &in) {
     if (s.framegen && !s.dedup)
         // framegen-needs-dedup
         limit("framegen-needs-dedup", Sev::Warning,
-              L"Frame generation is on but frames.dedup is off: it stays off, as it needs to know which frames are "
-              L"new.",
+              L"Frame generation stays off: repeated frames are kept, and it needs them dropped to know which "
+              L"frames are new. Set Repeated frames to Dropped under Advanced (About tab).",
               {{L"frames", L"dedup", L"1"}});
     if (s.framegen && !in.reshade_installed)
         // framegen-no-reshade
         limit("framegen-no-reshade", Sev::Warning,
-              L"ReShade is not downloaded: no frame generation and no DLSS 5. \"Glasir.exe --setup\" gets it.");
+              L"No frame generation and no DLSS 5: ReShade is not downloaded. Download it on the About tab.");
+    if (o.framegen && s.framegen_dlss) {
+        if (in.gpu.gpu.found && !dlss_fg_gpu(in.gpu.gpu))
+            // framegen-dlss-gpu: the app's own frames are made instead.
+            limit("framegen-dlss-gpu", Sev::Warning,
+                  L"The added frames are " APP_NAME_W L"'s own: NVIDIA DLSS Frame Generation needs an NVIDIA RTX 40 or "
+                  L"50 series GPU, and the picture is drawn on " + in.gpu.gpu.name + L".",
+                  {{L"framegen", L"backend", L"own"}});
+        else if (!in.dlssfg_installed)
+            // framegen-dlss-not-downloaded
+            limit("framegen-dlss-not-downloaded", Sev::Warning,
+                  L"The added frames are " APP_NAME_W L"'s own until NVIDIA DLSS Frame Generation is downloaded (7 MB, "
+                  L"from NVIDIA). Download it on the About tab.");
+    }
+    if (o.framegen && s.framegen_anr && !in.anr_installed)
+        // framegen-anr-not-downloaded
+        limit("framegen-anr-not-downloaded", Sev::Warning,
+              L"The added frames are " APP_NAME_W L"'s own until Apex ANR is downloaded (4 MB, Apex Compute's beta). "
+              L"Download it on the About tab.");
     if (o.framegen && d.found && refresh <= 0)
         // refresh-unknown
         limit("refresh-unknown", Sev::Info,
@@ -320,14 +345,14 @@ Advice advise(const AdviceInput &in) {
     if (s.framegen && s.framegen_max_hz > 0 && refresh > 0 && !o.capped)
         // framegen-cap-no-effect: a limit that is not below the screen's rate.
         limit("framegen-cap-no-effect", Sev::Info,
-              std::format(L"framegen.max_output_hz = {} is not below this screen's {:.0f} Hz, so it changes nothing. "
-                          L"0 means the same.",
+              std::format(L"The limit of {} fps changes nothing: it is not below this screen's {:.0f} Hz. \"The "
+                          L"screen's rate\" under Limit (Frame generation tab) means the same.",
                           s.framegen_max_hz, refresh),
               {{L"framegen", L"max_output_hz", L"0"}});
     if (o.framegen && o.max_shown_hz > 0) {
         const std::wstring hz = std::format(L"{:.0f} Hz", refresh);
-        const std::wstring why = o.capped ? std::format(L"framegen.max_output_hz is {}", s.framegen_max_hz)
-                                          : L"The screen is " + hz;
+        const std::wstring why = o.capped ? std::format(L"the limit is {} fps", s.framegen_max_hz)
+                                          : L"the screen is " + hz;
         const ShownRate *thirty = nullptr;
         bool none = true, sixty = true;  // sixty: a 60 fps game gets frames added (or cannot be captured)
         for (const ShownRate &r : o.shown) {
@@ -338,12 +363,12 @@ Advice advise(const AdviceInput &in) {
         if (none)
             // framegen-nothing-doubled: not even 30 fps fits twice.
             limit("framegen-nothing-doubled", Sev::Warning,
-                  why + L": frame generation has no room to add a frame to anything (a 30 fps game needs 60 Hz).");
+                  L"No frames are added to anything: " + why + L", and even a 30 fps game needs 60.");
         else if (!sixty)
             // screen-60hz: 60 fps games get no frames added.
             limit("screen-60hz", Sev::Info,
-                  why + L": 60 fps games get no frames added (that needs 120 Hz); 30 fps games are shown at " +
-                      number(thirty ? thirty->shown_fps : 60.0) + L".");
+                  L"60 fps games get no frames added: " + why + L", and that needs 120. 30 fps games are shown at " +
+                      number(thirty ? thirty->shown_fps : 60.0) + L" fps.");
         std::wstring fewer, uneven, ceiling;
         int better_hz = 0;
         for (const ShownRate &r : o.shown) {
@@ -353,7 +378,7 @@ Advice advise(const AdviceInput &in) {
                 fewer += (fewer.empty() ? L"" : L"; ") + rate +
                          std::format(L" gets x{} ({} fps), as ", r.multiplier, number(r.shown_fps)) +
                          (r.kept_even ? L"more would not fall on whole refreshes of this fixed " + hz + L" screen"
-                          : o.capped  ? std::format(L"more is over framegen.max_output_hz = {}", s.framegen_max_hz)
+                          : o.capped  ? std::format(L"more is over the limit of {} fps", s.framegen_max_hz)
                                       : L"more is over what this " + hz + L" screen shows");
             if (r.cadence == FramegenStatus::Cadence::FixedUneven) {
                 uneven += (uneven.empty() ? L"" : L", ") + rate + L" at " + number(r.shown_fps) + L" fps";
@@ -367,7 +392,7 @@ Advice advise(const AdviceInput &in) {
             // framegen-fewer-fit: more than x2 was asked for, and less is used.
             fewer[0] = L'A';
             limit("framegen-fewer-fit", Sev::Info,
-                  std::format(L"Up to x{} is asked for (framegen.multiplier). ", o.multiplier_wanted) + fewer + L".");
+                  std::format(L"Up to x{} is chosen. ", o.multiplier_wanted) + fewer + L".");
         }
         if (!uneven.empty()) {
             // framegen-uneven: a fixed refresh rate the output does not divide.
@@ -390,49 +415,61 @@ Advice advise(const AdviceInput &in) {
 
     // ------------------------------------------------------------ variable refresh
     const bool nvidia_screen = d.gpu_vendor == kVendorNvidia;
-    const std::wstring kind = d.vrr_kind.empty() ? L"variable refresh" : d.vrr_kind;
-    const std::wstring range = d.vrr_min_hz > 0 && d.vrr_max_hz > 0
-                                   ? L" (" + number(d.vrr_min_hz) + L"-" + number(d.vrr_max_hz) + L" Hz)"
-                                   : L"";
-    const std::wstring fixed = refresh > 0 ? L" Frames then wait for the screen's fixed " + number(refresh) +
-                                                 L" Hz beat, so they are paced less evenly."
-                                           : L" Frames are then paced less evenly.";
+    // One name for the thing, "variable refresh", with the screen's brand
+    // for it and its range in brackets: "variable refresh (FreeSync, 48-144 Hz)".
+    std::wstring brand = d.vrr_kind;
+    if (d.vrr_min_hz > 0 && d.vrr_max_hz > 0)
+        brand += (brand.empty() ? L"" : L", ") + number(d.vrr_min_hz) + L"-" + number(d.vrr_max_hz) + L" Hz";
+    const std::wstring vrr_named = L"variable refresh" + (brand.empty() ? L"" : L" (" + brand + L")");
+    const std::wstring fixed = refresh > 0 ? L"Frames wait for the screen's fixed " + number(refresh) +
+                                                 L" Hz beat, so they are paced less evenly"
+                                           : L"Frames are paced less evenly";
     if (vrr_user >= 0) {
-        // vrr-override: the user said so; say when Glasir found otherwise.
+        // vrr-override: the user said so; say when the app found otherwise.
         const bool differs = d.found && ((vrr_user == 1 && (d.vrr == Vrr::Off || d.vrr == Vrr::Unsupported)) ||
                                          (vrr_user == 0 && d.vrr == Vrr::On));
         if (differs)
             limit("vrr-override", Sev::Info,
-                  std::wstring(L"display.vrr = ") + vrr_setting_name(s.vrr) + L" in glasir.ini; Glasir found it " +
-                      vrr_name(d.vrr) + L" for this screen. \"auto\" follows what it finds.",
+                  std::wstring(L"Variable refresh is set to ") + (vrr_user == 1 ? L"On" : L"Off") + L" here, but " APP_NAME_W
+                      L" found it " + (d.vrr == Vrr::On ? L"on" : d.vrr == Vrr::Off ? L"off" : L"missing") +
+                      L" on this screen. \"As found\" (Screen tab) follows what it finds.",
                   {{L"display", L"vrr", L"auto"}});
     } else if (d.found && d.vrr == Vrr::Off) {
         // vrr-off: the screen can, but it is switched off.
         limit("vrr-off", Sev::Warning,
-              L"This screen has " + kind + range + L", but it is not switched on." + fixed +
+              fixed + L": this screen's " + vrr_named + L" is not switched on." +
                   (nvidia_screen ? L" Turn it on in the NVIDIA Control Panel (\"Set up G-SYNC\": pick this screen, "
                                    L"enable it for windowed and full screen mode), and in the monitor's own menu."
                                  : L" Turn it on in the GPU's control panel, and in the monitor's own menu."));
     } else if (d.found && d.vrr == Vrr::Unsupported) {
         // vrr-none: no VRR on this screen.
-        limit("vrr-none", Sev::Info, L"No variable refresh (G-SYNC, FreeSync) was found on this screen." + fixed);
+        limit("vrr-none", Sev::Info, fixed + L": no variable refresh was found on this screen.");
     } else if (d.found && d.vrr == Vrr::Supported) {
         // vrr-not-confirmed: the screen can; nothing says whether it is on.
         limit("vrr-not-confirmed", Sev::Info,
-              L"This screen has " + kind + range + L", but Glasir could not read whether it is switched on with this "
-              L"GPU. If it is, set display.vrr = on.");
+              L"This screen has " + vrr_named + L", but " APP_NAME_W L" could not read whether it is switched on with "
+              L"this GPU. If it is, set Variable refresh to On (Screen tab).");
     } else if (d.found && d.vrr == Vrr::Unknown) {
         // vrr-unknown
         limit("vrr-unknown", Sev::Info,
-              L"Glasir could not tell whether this screen has variable refresh (G-SYNC, FreeSync). If it has and it "
-              L"is on, set display.vrr = on; if not, display.vrr = off.");
+              APP_NAME_W L" could not tell whether this screen has variable refresh. If it has and it is on, set "
+              L"Variable refresh to On (Screen tab); if not, to Off.");
     }
     if (d.found && d.vrr == Vrr::On && d.vrr_windowed == DisplayInfo::Tri::No && vrr_user != 0)
-        // vrr-fullscreen-only: Glasir's full screen is a window.
+        // vrr-fullscreen-only: the app's full screen is a window.
         limit("vrr-fullscreen-only", Sev::Warning,
-              L"G-SYNC is on for full screen mode only. Glasir's full screen is a window that covers the screen, so "
-              L"it may not get it: in the NVIDIA Control Panel, \"Set up G-SYNC\", choose \"Enable for windowed and "
-              L"full screen mode\".");
+              L"The picture may not get variable refresh: G-SYNC is on for full screen mode only, and " APP_NAME_W
+              L"'s full screen is a window that covers the screen. In the NVIDIA Control Panel, \"Set up G-SYNC\", "
+              L"choose \"Enable for windowed and full screen mode\".");
+    if (d.found && nvidia_screen && d.vrr != Vrr::Unsupported && vrr_user != 0 && in.mpv_profile_vrr >= 0 &&
+        in.mpv_profile_vrr < 2)
+        // vrr-program-profile: the driver's settings for mpv.exe say less
+        // than the global ones (the launcher offers "Fix": vrr.h).
+        limit("vrr-program-profile", Sev::Warning,
+              L"The screen would keep its fixed rate: the NVIDIA driver's profile \"" + in.mpv_profile +
+                  L"\" allows G-SYNC for mpv " + (in.mpv_profile_vrr == 0 ? L"not at all" : L"in full screen mode only") +
+                  L", whatever the global setting says, and " APP_NAME_W L"'s picture is a window. \"Fix\" allows it for "
+                  APP_NAME_W L"'s own mpv alone.");
 
     // ------------------------------------------------------------ HDR
     if (s.hdr) {
@@ -443,29 +480,28 @@ Advice advise(const AdviceInput &in) {
         if (plan.forced_without_hdr && d.found)
             // hdr-forced: HDR sent to a screen that is not in HDR.
             limit("hdr-forced", Sev::Warning,
-                  std::wstring(L"hdr.output = hdr, but ") +
+                  std::wstring(L"The picture will look washed out: it is sent as HDR, but ") +
                       (d.hdr_supported ? L"HDR is off in Windows for this screen" : L"this screen has no HDR") +
-                      L": the picture will look washed out. \"auto\" tone maps it to SDR instead.");
+                      L". \"Automatic\" under Send it as (Picture tab) tone maps it to SDR instead.");
         else if (plan.reason == HdrPlan::Reason::HdrOff)
             // hdr-off-in-windows
             limit("hdr-off-in-windows", Sev::Warning,
-                  L"HDR is off in Windows for this screen: the HDR capture is tone mapped to SDR. Turn on \"Use "
+                  L"The HDR signal is tone mapped to SDR: HDR is off in Windows for this screen. Turn on \"Use "
                   L"HDR\" in Windows' display settings (Win+Alt+B) to see it in HDR.");
         else if (plan.reason == HdrPlan::Reason::NoHdr)
             // hdr-no-screen
             limit("hdr-no-screen", Sev::Info,
-                  L"This screen has no HDR: the HDR capture is tone mapped to SDR.");
+                  L"The HDR signal is tone mapped to SDR: this screen has no HDR.");
         if (plan.output == HdrPlan::Output::Hdr && s.hdr_fit_to_screen && !plan.fit)
             // hdr-fit-no-peak: nothing to fit to.
             limit("hdr-fit-no-peak", Sev::Warning,
-                  L"hdr.fit_to_screen = 1, but this screen reports no peak brightness to Windows and "
-                  L"hdr.display_peak_nits is 0: the picture goes out as the console sends it. Set "
-                  L"hdr.display_peak_nits to the screen's peak.");
+                  L"Highlights are not fitted: this screen reports no peak brightness to Windows, so the picture "
+                  L"goes out as the console sends it. Choose the screen's peak under Screen peak (Picture tab).");
         else if (plan.fit && plan.peak_reported)
             // hdr-fit-reported-peak: fitted to the screen's own word.
             limit("hdr-fit-reported-peak", Sev::Info,
                   std::format(L"The picture is fitted to the {} nits this screen reports to Windows, which is often "
-                              L"too low. If you know its real peak, set hdr.display_peak_nits.",
+                              L"too low. If you know its real peak, choose it under Screen peak (Picture tab).",
                               plan.peak_nits));
     }
 
@@ -474,36 +510,36 @@ Advice advise(const AdviceInput &in) {
     if (in.gpu.setting_not_found)
         // gpu-setting-not-found
         limit("gpu-setting-not-found", Sev::Warning,
-              L"display.gpu = " + s.gpu + L" names no GPU of this PC: mpv draws on " +
-                  (gpu.found ? gpu.name : std::wstring(L"its own choice")) + L".");
+              L"The picture is drawn on " + (gpu.found ? gpu.name : std::wstring(L"the GPU mpv picks")) +
+                  L": the GPU chosen before (\"" + s.gpu + L"\") is not in this PC. Choose one under GPU (Screen tab).");
     if (in.gpu.other_than_screen)
         // gpu-other-than-screen: frames cross from one GPU to the other.
         limit("gpu-other-than-screen", Sev::Warning,
-              L"mpv draws on " + gpu.name + L", but the screen is plugged into " + in.gpu.screen_gpu.name +
-                  L": every frame is copied across, which adds latency, and variable refresh may not hold. Plug the "
-                  L"screen into the " + gpu.name + L" if you can.");
+              L"Every frame is copied from one GPU to another, which adds latency, and variable refresh may not "
+              L"hold: the picture is drawn on " + gpu.name + L", but the screen is plugged into " +
+                  in.gpu.screen_gpu.name + L". Plug the screen into the " + gpu.name + L" if you can.");
 
     const bool dlss5_possible = in.reshade_installed && in.dlss5_installed;
     o.dlss5 = dlss5_possible && s.dlss5 != Settings::Dlss5::Off && (s.dlss5 == Settings::Dlss5::On || dlss5_gpu(gpu));
     if (gpu.found && !dlss5_gpu(gpu) && s.dlss5 != Settings::Dlss5::Off) {
         // dlss5-gpu: not an RTX 30, 40 or 50.
         limit("dlss5-gpu", s.dlss5 == Settings::Dlss5::On ? Sev::Warning : Sev::Info,
-              L"DLSS 5 needs an NVIDIA RTX 30, 40 or 50 series GPU; mpv draws on " + gpu.name +
-                  (s.dlss5 == Settings::Dlss5::On ? L". It is tried anyway (dlss5.enabled = on)." : L"."));
+              L"DLSS 5 needs an NVIDIA RTX 30, 40 or 50 series GPU, and the picture is drawn on " + gpu.name +
+                  (s.dlss5 == Settings::Dlss5::On ? L". It is tried anyway, as the settings file asks." : L"."));
         // gpu-has-rtx: another GPU of this PC could run it (a hybrid laptop).
         for (const GpuInfo &other : in.gpus)
             if (dlss5_gpu(other) && !in.gpu.by_setting) {
                 recommend("gpu-has-rtx",
-                          L"This PC also has " + other.name + L". display.gpu = " + other.name +
-                              L" draws on it and gets DLSS 5, but every frame is then copied to the screen's GPU: "
-                              L"some latency, and variable refresh may not hold. Glasir does not switch by itself.",
+                          L"This PC also has " + other.name +
+                              L". Drawing on it gets DLSS 5, but every frame is then copied to the screen's GPU: "
+                              L"some latency, and variable refresh may not hold. " APP_NAME_W L" does not switch by itself.",
                           {{L"display", L"gpu", other.name}});
                 break;
             }
     } else if (dlss5_gpu(gpu) && in.reshade_installed && !in.dlss5_installed && s.dlss5 != Settings::Dlss5::Off) {
         // dlss5-not-downloaded
         limit("dlss5-not-downloaded", Sev::Info,
-              L"This GPU can run DLSS 5, but it is not downloaded: \"Glasir.exe --setup\" offers it.");
+              L"This GPU can run DLSS 5, but it is not downloaded. Download it on the About tab.");
     }
 
     // ------------------------------------------------------------ recommendations
@@ -517,24 +553,24 @@ Advice advise(const AdviceInput &in) {
         const wchar_t *pick = L"mpv";
         std::wstring why;
         if (mode && !o.upscaled && o.picture_height > 0) {
-            why = L"The capture already fills its place on the screen, so nothing is scaled up";
+            why = L"Scaling could be plain mpv: nothing is scaled up here";
         } else if (o.gpu_class == GpuClass::High) {
             pick = L"cnn";
-            why = L"ArtCNN rebuilds the most detail, and this GPU has room for it" + guess;
+            why = L"Scaling could be ArtCNN: it rebuilds the most detail, and this GPU has room for it" + guess;
         } else if (o.gpu_class == GpuClass::Mid && vsr != L"none") {
             pick = L"vsr";
-            why = L"The GPU's video super resolution runs in its video engine, beside DLSS 5 and frame generation" +
-                  guess;
+            why = L"Scaling could be video super resolution: it runs in the GPU's video engine, beside DLSS 5 and "
+                  L"frame generation" + guess;
         } else {
             pick = L"fsr";
-            why = L"FSR 1 sharpens edges for very little GPU time" + guess;
+            why = L"Scaling could be FSR 1: it sharpens edges for very little GPU time" + guess;
         }
-        recommend("rec-scaling", std::wstring(L"Scaling: ") + pick + L". " + why + L".",
-                  {{L"video", L"scaling", pick}});
+        recommend("rec-scaling", why + L".", {{L"video", L"scaling", pick}});
         if (s.scaling == Settings::Scaling::Vsr && gpu.found && vsr == L"none")
             // vsr-unavailable
             limit("vsr-unavailable", Sev::Warning,
-                  L"video.scaling = vsr needs an NVIDIA RTX or Intel GPU; on " + gpu.name + L" FSR 1 is used instead.",
+                  L"FSR 1 is used in place of video super resolution: that needs an NVIDIA RTX or Intel GPU, and "
+                  L"the picture is drawn on " + gpu.name + L".",
                   {{L"video", L"scaling", pick}});
     }
     {
@@ -543,22 +579,22 @@ Advice advise(const AdviceInput &in) {
         const bool fast = o.gpu_class == GpuClass::Low || o.gpu_class == GpuClass::Unknown ||
                           (o.gpu_class == GpuClass::Mid && o.dlss5);
         recommend("rec-framegen-quality",
-                  std::wstring(L"Frame generation quality: ") + (fast ? L"fast" : L"high") + L". " +
+                  std::wstring(L"Frame generation quality could be ") + (fast ? L"Fast" : L"High") + L": " +
                       (o.gpu_class == GpuClass::Unknown
-                           ? L"The GPU could not be judged; fast takes about half the GPU time."
+                           ? L"the GPU could not be judged, and Fast takes about half the GPU time."
                            : fast ? (o.gpu_class == GpuClass::Mid
-                                         ? L"DLSS 5 and frame generation share the GPU, and fast takes about half "
+                                         ? L"DLSS 5 and frame generation share the GPU, and Fast takes about half "
                                            L"the time" + guess + L"."
-                                         : L"Fast takes about half the GPU time" + guess + L".")
-                                  : L"This GPU has room for the cleaner one" + guess + L"."),
+                                         : L"it takes about half the GPU time" + guess + L".")
+                                  : L"this GPU has room for the cleaner one" + guess + L"."),
                   {{L"framegen", L"quality", fast ? L"fast" : L"high"}});
         // rec-framegen-multiplier: only said when more than x2 is asked of a
         // GPU that has little to spare; x3 and x4 stay the user's choice.
         if (s.framegen && o.multiplier_wanted > 2 &&
             (o.gpu_class == GpuClass::Low || (o.gpu_class == GpuClass::Mid && o.dlss5)))
             recommend("rec-framegen-multiplier",
-                      std::format(L"Frame generation: up to x2. Every frame in between is a whole pass on the GPU, and "
-                                  L"x{} makes {} of them per game frame",
+                      std::format(L"Frame generation could be up to x2: every added frame is a whole pass on the GPU, "
+                                  L"and x{} makes {} of them per game frame",
                                   o.multiplier_wanted, o.multiplier_wanted - 1) +
                           guess + L".",
                       {{L"framegen", L"multiplier", L"2"}});
@@ -566,10 +602,10 @@ Advice advise(const AdviceInput &in) {
         const bool blend = o.gpu_class == GpuClass::Low && d.found && INT64(d.width) * d.height > 2560 * 1440 + 1 &&
                            o.picture_height > 1440;
         recommend("rec-framegen-method",
-                  std::wstring(L"Frame generation method: ") + (blend ? L"blend" : L"motion") + L". " +
-                      (blend ? L"Following motion at this size is a lot for this GPU" + guess +
-                                   L"; a plain mix is the lightest. Try motion with fast quality first."
-                             : std::wstring(L"The frame in between follows what moves; blend (a plain mix) is only "
+                  std::wstring(L"Frame generation method could be ") + (blend ? L"Blend" : L"Motion") + L": " +
+                      (blend ? L"following motion at this size is a lot for this GPU" + guess +
+                                   L", and a plain mix is the lightest. Try Motion with Fast quality first."
+                             : std::wstring(L"the added frame then follows what moves. Blend (a plain mix) is only "
                                             L"for a GPU that cannot keep up.")),
                   {{L"framegen", L"method", blend ? L"blend" : L"motion"}});
     }
@@ -587,17 +623,16 @@ Advice advise(const AdviceInput &in) {
             const std::wstring lines = std::format(L"{}p", mode->height);
             console("console-resolution", lines,
                     L"Video output resolution: " + lines + L" (" + size_text(*mode) +
-                        L"), the size Glasir captures. Another size is scaled by the console or the card first.");
+                        L"), the size " APP_NAME_W L" captures. Another size is scaled by the console or the card first.");
         }
         // console-hdr: as video.mode.
         if (s.hdr)
             console("console-hdr", L"HDR on",
-                    L"HDR: on (PS5: \"On When Supported\" or \"Always On\"; Xbox: \"Allow HDR10\"). Glasir captures "
-                    L"in HDR (video.mode = hdr); an SDR signal would look wrong.");
+                    L"HDR: on (PS5: \"On When Supported\" or \"Always On\"; Xbox: \"Allow HDR10\"). " APP_NAME_W L" shows "
+                    L"the signal as HDR; an SDR signal would look wrong.");
         else
             console("console-hdr", L"HDR off",
-                    L"HDR: off. Glasir captures in SDR (video.mode = sdr); an HDR signal would look grey and washed "
-                    L"out.");
+                    L"HDR: off. " APP_NAME_W L" shows the signal as SDR; an HDR signal would look grey and washed out.");
         if (mode) {
             // console-120hz: only for a capture mode of 120 fps.
             const bool fast = mode->fps >= 100;
@@ -613,7 +648,7 @@ Advice advise(const AdviceInput &in) {
         // console-hdr-calibration: HDR passed through as the console sends it.
         if (s.hdr && o.hdr == Outcome::Hdr::Hdr && !o.hdr_plan.fit)
             console("console-hdr-calibration", L"",
-                    L"Run the console's HDR calibration once while playing through Glasir (PS5: \"Adjust HDR\"; "
+                    L"Run the console's HDR calibration once while playing through " APP_NAME_W L" (PS5: \"Adjust HDR\"; "
                     L"Xbox: \"Calibrate HDR for games\"): the picture goes to this screen as the console sends it, "
                     L"so that is what fits it to the screen.");
     }
@@ -633,7 +668,7 @@ std::wstring advice_text(const Advice &advice) {
     const Outcome &o = advice.outcome;
     std::wstring t = L"What will happen:\n";
     if (o.capture_known)
-        t += std::format(L"  Capture: {} {}x{} at {} fps, {}\n", o.capture.subtype, o.capture.width, o.capture.height,
+        t += std::format(L"  Capture: {} {} x {} at {} fps, {}\n", o.capture.subtype, o.capture.width, o.capture.height,
                          number(o.capture.fps),
                          o.media_foundation ? std::format(L"Media Foundation, {:.2f} GB/s raw", o.raw_gb_per_s)
                                             : std::wstring(L"DirectShow (no dedup or frame generation)"));
@@ -653,8 +688,21 @@ std::wstring advice_text(const Advice &advice) {
     t += L"  Variable refresh, as frame generation is told: " + o.vrr + L"\n";
     t += std::wstring(L"  DLSS 5: ") + (o.dlss5 ? L"on" : L"off") + L"\n";
     if (o.picture_height > 0)
-        t += std::format(L"  Picture: {}x{} on the screen{}\n", o.picture_width, o.picture_height,
+        t += std::format(L"  Picture: {} x {} on the screen{}\n", o.picture_width, o.picture_height,
                          o.upscaled ? L", scaled up from the capture" : L"");
+    // The texts name the launcher's controls. For what the launcher does
+    // with a button, the command line that does the same is added here.
+    static const struct {
+        const char *id;
+        const wchar_t *command;
+    } kCommands[] = {
+        {"monitor-not-found", APP_EXE_W L" --system lists the screens"},
+        {"framegen-no-reshade", APP_EXE_W L" --setup"},
+        {"framegen-dlss-not-downloaded", APP_EXE_W L" --setup --components dlssfg"},
+        {"framegen-anr-not-downloaded", APP_EXE_W L" --setup --components anr"},
+        {"dlss5-not-downloaded", APP_EXE_W L" --setup --components dlss5"},
+        {"vrr-program-profile", APP_EXE_W L" --gsync-profile fix; \"restore\" puts back what was there"},
+    };
     std::wstring limits, recommended, console;
     for (const AdviceItem &i : advice.items) {
         if (i.kind == AdviceKind::Console) {
@@ -667,6 +715,8 @@ std::wstring advice_text(const Advice &advice) {
                     : i.severity == AdviceSeverity::Warning ? L"[warning] "
                                                             : L"[info] ";
         line += i.text + L" (" + widen(i.id) + L")";
+        for (const auto &c : kCommands)
+            if (i.id == c.id) line += std::wstring(L"\n      ") + c.command;
         if (!i.suggest.empty()) {
             line += L"\n      ";
             for (size_t k = 0; k < i.suggest.size(); ++k) line += (k ? L", " : L"") + setting_text(i.suggest[k]);
@@ -680,4 +730,4 @@ std::wstring advice_text(const Advice &advice) {
     return t;
 }
 
-}  // namespace glasir
+}  // namespace app

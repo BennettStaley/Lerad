@@ -9,9 +9,9 @@
 
 #include "pixel_format.h"
 
-namespace glasir {
+namespace app {
 
-// A mode a card offers. Formats Glasir cannot pass on raw (MJPEG, RGB, ...)
+// A mode a card offers. Formats the app cannot pass on raw (MJPEG, RGB, ...)
 // are kept too, with supported = false, for the list and the DirectShow
 // fallback.
 struct VideoMode {
@@ -22,7 +22,7 @@ struct VideoMode {
     double fps = 0;
     // The rates the driver says this mode can be set to, when it gives a
     // range instead of one mode per rate (0: it does not say). Shown by
-    // --list only; Glasir asks for fps.
+    // --list only; the app asks for fps.
     double fps_min = 0, fps_max = 0;
 };
 
@@ -65,4 +65,4 @@ bool looks_like_camera(const std::wstring &name);
 bool names_match(const std::wstring &a, const std::wstring &b);
 bool name_contains(const std::wstring &haystack, const std::wstring &needle);
 
-}  // namespace glasir
+}  // namespace app

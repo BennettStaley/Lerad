@@ -1,15 +1,15 @@
 # Third-party notices
 
-Glasir is MIT (see `LICENSE`), with the frame generation files under the
+Lerad is MIT (see `LICENSE`), with the frame generation files under the
 Mozilla Public License 2.0 (`LICENSES/MPL-2.0.txt`). It includes or uses the
 third-party components below. Each keeps its own licence.
 
-## Included in Glasir
+## Included in Lerad
 
 ### ReShade add-on API headers
 
-Used to build Glasir's ReShade add-ons. Source: https://github.com/crosire/reshade
-(tag v6.8.0). Not an endorsement of Glasir by ReShade or its author.
+Used to build Lerad's ReShade add-ons. Source: https://github.com/crosire/reshade
+(tag v6.8.0). Not an endorsement of Lerad by ReShade or its author.
 
 ```
 Copyright 2014 Patrick Mours. All rights reserved.
@@ -25,7 +25,7 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND 
 
 ### mpv client API header
 
-Used to build Glasir's mpv plugin. Source: https://github.com/mpv-player/mpv
+Used to build Lerad's mpv plugin. Source: https://github.com/mpv-player/mpv
 (tag v0.41.0, `include/mpv/client.h`).
 
 ```
@@ -46,9 +46,9 @@ OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 ### WASAPI audio plugin (z-er, MPV-SW-Capture)
 
-Glasir's audio plugin (`src/audio`, `glasir_audio.dll`) is based on the
+Lerad's audio plugin (`src/audio`, `capture_audio.dll`) is based on the
 WASAPI audio plugin by z-er (Josh S) for MPV-SW-Capture:
-https://github.com/z-er/MPV-SW-Capture (`native-audio/`). Modified for Glasir.
+https://github.com/z-er/MPV-SW-Capture (`native-audio/`). Modified for Lerad.
 
 ```
 MIT License
@@ -105,8 +105,8 @@ SOFTWARE.
 
 ### AMD FidelityFX Super Resolution 1
 
-`engine\portable_config\shaders\glasir_fsr1.glsl` (the FSR 1 scaling) is
-Glasir's port of AMD's `ffx_fsr1.h`, from
+`engine\portable_config\shaders\fsr1.glsl` (the FSR 1 scaling) is
+Lerad's port of AMD's `ffx_fsr1.h`, from
 https://github.com/GPUOpen-Effects/FidelityFX-FSR (v1.0.2).
 
 ```
@@ -160,13 +160,32 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
+### AMD FidelityFX API headers
+
+`third_party/fidelityfx/` holds five header files of AMD's FidelityFX SDK
+(https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK, tag v2.4.0),
+unmodified: the API of FSR frame generation, used by a developer tool
+(`fg_eval`). MIT; each file carries the licence text and
+"Copyright (C) 2026 Advanced Micro Devices, Inc." at its top. No AMD library
+is included.
+
+### NVIDIA DLSS SDK (declarations)
+
+A few structure layouts, function names and parameter names in
+`src/framegen/fg_dlss.h` (DLSS Frame Generation) are written out from the
+headers of NVIDIA's DLSS SDK, https://github.com/NVIDIA/DLSS
+(`nvsdk_ngx_defs.h`, `nvsdk_ngx_params.h`, `nvsdk_ngx_defs_dlssg.h`). No
+NVIDIA file or library is included: Lerad calls the NGX library the driver
+installs, and downloads the model (below) on your PC.
+
 ### NVIDIA NVAPI (declarations)
 
 A few structure layouts, function numbers and setting numbers in
-`src/app/vrr.cpp` (asking NVIDIA's driver whether G-SYNC is on) are written
+`src/app/vrr.cpp` (asking NVIDIA's driver whether G-SYNC is on, and for
+which programs) are written
 out from the headers of NVIDIA's NVAPI SDK, https://github.com/NVIDIA/nvapi
 (`nvapi.h`, `nvapi_interface.h`, `NvApiDriverSettings.h`). No NVIDIA file or
-library is included: Glasir loads the `nvapi64.dll` the driver installs.
+library is included: Lerad loads the `nvapi64.dll` the driver installs.
 
 ```
 Copyright (c) 2019-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
@@ -224,10 +243,10 @@ SOFTWARE.
 ```
 
 The video super resolution (NVIDIA RTX, Intel) is the GPU maker's, in its
-driver; Glasir asks for it through mpv's d3d11vpp filter and includes none
+driver; Lerad asks for it through mpv's d3d11vpp filter and includes none
 of it.
 
-The menu uses the Segoe UI font that comes with Windows; Glasir does not
+The menu uses the Segoe UI font that comes with Windows; Lerad does not
 include it.
 
 <!--
@@ -238,12 +257,12 @@ Added as each part is ported (docs/PLAN.md):
 - DLSS5-Feeder (MIT, Jean-Laurent Rouzies; portions NIGos, MIT) if shipped.
 -->
 
-## Downloaded by Glasir, not included
+## Downloaded by Lerad, not included
 
-On its first start (and with `Glasir.exe --setup`), Glasir downloads these
-from their official sources on your PC, after asking. Glasir does not
+On its first start (and with `Lerad.exe --setup`), Lerad downloads these
+from their official sources on your PC, after asking. Lerad does not
 distribute them; their licences apply as published by their authors. Each
-Glasir downloads the versions it was tested with;
+Lerad downloads the versions it was tested with;
 `engine\components.ini` records which versions were installed, from where.
 
 | Component | Source | Licence |
@@ -254,4 +273,7 @@ Glasir downloads the versions it was tested with;
 | ReShade.fxh | https://github.com/crosire/reshade-shaders | CC0-1.0 |
 | RenoDX-DLSS5 | https://github.com/RankFTW/rhi-repo (RHI mirror) | MIT (source: Yukikaze20170315/RenoDX-DLSS5-Generic, clshortfuse/renodx) |
 | NVIDIA DLSS (`nvngx_dlss.dll`) | https://github.com/NVIDIA/DLSS | NVIDIA RTX SDKs licence |
+| NVIDIA DLSS Frame Generation (`nvngx_dlssg.dll`), only when chosen | https://github.com/NVIDIA/DLSS | NVIDIA RTX SDKs licence |
 | NVIDIA DLSS neural rendering (`nvngx_dlssnr.dll`) | https://github.com/RankFTW/rhi-repo (RHI mirror) | NVIDIA |
+| NVIDIA Video Frame Generation, only when chosen and after NVIDIA's licence is accepted | https://pypi.nvidia.com | NVIDIA's licence, shown before the download |
+| Apex Neural Rendering frame generation (beta), only when chosen | https://github.com/apex-compute/ANR | No licence text published yet; all rights with Apex Compute |

@@ -7,7 +7,7 @@
 #include <string>
 #include <vector>
 
-namespace glasir {
+namespace app {
 
 struct AudioInput {
     std::wstring id;    // WASAPI endpoint ID
@@ -24,7 +24,7 @@ std::optional<GUID> video_container(const std::wstring &symbolic_link);
 
 // The card's audio input: one on the same physical device (USB cards), else
 // one whose name contains the card's name without "Video" (PCIe cards share
-// one container with everything built in). wanted (glasir.ini) overrides:
+// one container with everything built in). wanted (the settings file) overrides:
 // an exact name or ID, else part of a name.
 std::optional<AudioInput> find_card_audio(const std::vector<AudioInput> &inputs, const std::wstring &video_name,
                                           const std::optional<GUID> &container, const std::wstring &wanted);
@@ -33,4 +33,4 @@ std::optional<AudioInput> find_card_audio(const std::vector<AudioInput> &inputs,
 // "Video (00 Pro Capture HDMI 4K+)" -> "00 Pro Capture HDMI 4K+"
 std::wstring card_base_name(const std::wstring &video_name);
 
-}  // namespace glasir
+}  // namespace app

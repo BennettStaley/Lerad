@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: MIT
-# Shared build settings for Glasir components.
+# Shared build settings for the components.
 
-# glasir_git_describe(<out-var>): short commit description, or "unknown"
+# app_git_describe(<out-var>): short commit description, or "unknown"
 # when building from a source archive without git.
-function(glasir_git_describe out_var)
+function(app_git_describe out_var)
     set(result "unknown")
     find_package(Git QUIET)
     if(GIT_FOUND)
@@ -21,10 +21,10 @@ function(glasir_git_describe out_var)
     set(${out_var} "${result}" PARENT_SCOPE)
 endfunction()
 
-# glasir_component(<target>): warnings, Unicode, lean Windows headers.
-function(glasir_component target)
+# app_component(<target>): warnings, Unicode, lean Windows headers.
+function(app_component target)
     target_compile_definitions(${target} PRIVATE
         UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
     target_compile_options(${target} PRIVATE /W4 /permissive- /utf-8 /EHsc)
-    target_link_libraries(${target} PRIVATE glasir_version)
+    target_link_libraries(${target} PRIVATE app_version)
 endfunction()

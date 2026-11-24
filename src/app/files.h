@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: MIT
-// File helpers shared by setup, the self-update and the bug report.
+// File helpers shared by setup and the bug report.
 #pragma once
 #include <windows.h>
 
 #include <string>
 #include <vector>
 
-namespace glasir {
+namespace app {
 
 bool file_exists(const std::wstring &path);
 // Lower-case hex SHA-256 of the file, "" if it cannot be read.
@@ -19,7 +19,8 @@ std::wstring product_name(const std::wstring &path);
 // The version resource's file version (major.minor.patch); false if none.
 bool file_version(const std::wstring &path, int (&version)[3]);
 
-// A new folder under %TEMP% (glasir-<what>-...), removed with what is in it.
+// A new folder under %TEMP% (APP_ID, <what> and more in its name), removed
+// with what is in it.
 class WorkDir {
 public:
     explicit WorkDir(const wchar_t *what = L"setup");
@@ -50,4 +51,4 @@ bool place_folder(const std::wstring &src, const std::wstring &dest, std::wstrin
 // Reads a whole file, also one another program has open for writing (a log).
 bool read_shared(const std::wstring &path, std::string &data);
 
-}  // namespace glasir
+}  // namespace app

@@ -1,22 +1,23 @@
 // SPDX-License-Identifier: MIT
-// Glasir's window before playing: the card and its mode, SDR or HDR, the
-// enhancements, the sound and the window mode. An ordinary window (mpv and
-// ReShade are not running yet), drawn with Dear ImGui in Glasir's look.
-// What it changes goes into glasir.ini when Play is pressed.
+// The app's window before playing. A wide window: six tabs of choices on the
+// left (Play, Picture, Frame generation, Screen, Sound, About), what they
+// come to on this PC on the right, and Play in a bar along the bottom. An
+// ordinary window (mpv and ReShade are not running yet), drawn with Dear
+// ImGui in the app's look (ui_style.h, ui_widgets.h). What it changes goes
+// into the settings file when Play is pressed.
+//
+// Two switches for tests, in the environment: UI_SCALE forces the window's
+// scale (1 is 920 x 640), UI_TAB says which tab is open at the start (0 to 5).
 #pragma once
 #include <functional>
 #include <string>
 
-namespace glasir {
+namespace app {
 
-class UpdateCheck;
-
-// Setup: download the components again. SelfUpdate: install the newer
-// Glasir the update check found.
-enum class LauncherAction { Play, Setup, SelfUpdate, Quit };
+// Setup: download the components again.
+enum class LauncherAction { Play, Setup, SetupDlssFg, SetupVideo, SetupAnr, Quit };
 
 struct LauncherExtras {
-    const UpdateCheck *update = nullptr;  // shows "Glasir x.y.z is out" when it found one
     // Saves a bug report (run on a thread of its own); the zip's path.
     std::function<bool(std::wstring &zip, std::wstring &error)> bug_report;
 };
@@ -24,4 +25,4 @@ struct LauncherExtras {
 LauncherAction run_launcher(const std::wstring &settings_path, const std::wstring &engine_dir,
                             const LauncherExtras &extras);
 
-}  // namespace glasir
+}  // namespace app

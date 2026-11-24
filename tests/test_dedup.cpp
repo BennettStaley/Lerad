@@ -13,7 +13,7 @@
 #include "repeat_filter.h"
 #include "signal_kind.h"
 
-using namespace glasir;
+using namespace app;
 
 namespace {
 
@@ -92,9 +92,29 @@ int main() {
         expect(f.take(b.data()) && !f.keepalive(), true, "keepalive: a new frame after it is new again");
     }
     {
+        // A mode of 30 fps is taken at its word until the card sends more.
+        RepeatFilter f(PixelFormat::P010, W, H, 2, 100000, true, 30.0);
+        auto a = make_frame(100), b = make_frame(300);
+        f.take(a.data());
+        expect(f.take(a.data()), true, "mode's rate trusted: a still picture's frame is new");
+        f.measured(59.94);
+        expect(f.trusted(), true, "mode's rate: one fast second is not enough");
+        f.measured(30.0);
+        f.measured(59.94);
+        expect(f.trusted(), true, "mode's rate: nor two with a slow one between");
+        f.measured(59.94);
+        expect(f.trusted(), false, "mode's rate: two fast seconds, 60 in a 30 mode");
+        expect(f.take(b.data()), true, "60 in a 30 mode: B is sent");
+        expect(f.take(b.data()), false, "60 in a 30 mode: repeated B is dropped");
+        f.measured(29.97);
+        f.measured(30.1);
+        expect(f.trusted(), true, "mode's rate: trusted again at 30");
+        expect(f.take(b.data()), true, "mode's rate trusted again: every frame is new");
+    }
+    {
         // FrameSlot's drop counting, which the frame generation add-on backs off on.
         auto a = make_frame(100);
-        GlasirFrameGenLink link{};
+        FrameGenLink link{};
         FrameSlot slot(a.size());
         slot.set_link(&link);
         UINT64 published = 0, dropped = 0;
@@ -124,7 +144,7 @@ int main() {
     {
         // Repeats sent while frame generation is off (the add-on sets send_repeats).
         auto a = make_frame(100), b = make_frame(300);
-        GlasirFrameGenLink link{};
+        FrameGenLink link{};
         FrameSlot slot(a.size());
         slot.set_link(&link);
         RepeatFilter f(PixelFormat::P010, W, H, 2, 100000);
@@ -152,6 +172,108 @@ int main() {
         slot.take(0);
         deliver_frame(slot, sinks, a.data(), a.size());
         expect(slot.take(0) != nullptr, false, "send repeats off again: repeats are dropped again");
+    }
+    {
+        // Every frame a game frame (frames.every_frame): no filter, so a still
+        // picture goes out as new frames, each stamped into the link.
+        expect(capture_rate_is_game_rate(30.0) && capture_rate_is_game_rate(29.97) && capture_rate_is_game_rate(24.0),
+               true, "every frame: a capture of 30 fps or less is the game's rate");
+        expect(capture_rate_is_game_rate(60.0) || capture_rate_is_game_rate(59.94) || capture_rate_is_game_rate(0),
+               false, "every frame: not a capture of 60 fps, nor an unknown rate");
+        auto a = make_frame(100);
+        FrameGenLink link{};
+        FrameSlot slot(a.size());
+        slot.set_link(&link);
+        const FrameSinks sinks{};
+        UINT64 published = 0, dropped = 0;
+        for (int i = 0; i < 3; ++i) {
+            deliver_frame(slot, sinks, a.data(), a.size());
+            expect(slot.take(0) != nullptr, true, "every frame: a still picture's frame is sent");
+        }
+        slot.counts(published, dropped);
+        expect(published == 3 && link.published == 3 && dropped == 0, true, "every frame: each one is stamped as new");
+    }
+    {
+        // The game's rhythm held (CadenceHold): a 30 fps game in a 60 fps
+        // capture, then a picture that hardly moves.
+        RepeatFilter f(PixelFormat::P010, W, H, 3, 100000, true);
+        bool pairs_ok = true;
+        for (int n = 0; n < 12; ++n) {
+            auto a = make_frame(static_cast<UINT16>(100 + 20 * n));
+            pairs_ok = f.take(a.data()) && pairs_ok;
+            pairs_ok = !f.take(a.data()) && pairs_ok;
+        }
+        expect(pairs_ok, true, "hold: A A B B goes out as A B");
+        expect(f.cadence() == CadenceHold::Mode::Alternate, true, "hold: and is seen as every other frame");
+        auto still = make_frame(400);
+        f.take(still.data());
+        f.take(still.data());
+        bool held = true;
+        for (int n = 0; n < 20; ++n) {
+            held = f.take(still.data()) && held;
+            held = !f.take(still.data()) && held;
+        }
+        expect(held, true, "hold: a still picture keeps every other frame going out");
+        // A slow fade: 1 code a game frame, under the threshold for two of three.
+        bool fade = true;
+        for (int n = 1; n <= 12; ++n) {
+            auto a = make_frame(static_cast<UINT16>(400 + n));
+            fade = f.take(a.data()) && fade;
+            fade = !f.take(a.data()) && fade;
+        }
+        expect(fade, true, "hold: a slow fade keeps every other frame going out");
+        // The game runs a frame late: A A A B B. B is new, and its turn from then on.
+        auto b = make_frame(700), c = make_frame(900);
+        f.take(still.data());
+        expect(f.take(b.data()), true, "hold: a frame out of turn that moved is sent");
+        expect(f.take(b.data()), false, "hold: and its repeat is not");
+        expect(f.take(c.data()), true, "hold: the turn is the late frame's from then on");
+        expect(f.take(c.data()), false, "hold: (its repeat dropped)");
+
+        // The game goes to 60 fps: every frame new, also once the picture stands still.
+        bool all = true;
+        for (int n = 0; n < 20; ++n) {
+            auto a = make_frame(static_cast<UINT16>(100 + 20 * n));
+            all = f.take(a.data()) && all;
+        }
+        expect(all, true, "hold: a 60 fps game's frames all go out");
+        expect(f.cadence() == CadenceHold::Mode::Every, true, "hold: and it is seen as every frame");
+        auto last = make_frame(480);
+        f.take(last.data());
+        all = true;
+        for (int n = 0; n < 10; ++n) all = f.take(last.data()) && all;
+        expect(all, true, "hold: a still picture then keeps every frame going out");
+        // Back to 30 fps.
+        for (int n = 0; n < 12; ++n) {
+            auto a = make_frame(static_cast<UINT16>(120 + 20 * n));
+            f.take(a.data());
+            f.take(a.data());
+        }
+        expect(f.cadence() == CadenceHold::Mode::Alternate, true, "hold: back at 30 fps it is every other frame again");
+
+        // An uneven rate (A A B C C D): no rhythm, pictures compared one by one.
+        RepeatFilter u(PixelFormat::P010, W, H, 3, 100000, true);
+        bool uneven = true;
+        for (int n = 0; n < 12; ++n) {
+            auto a = make_frame(static_cast<UINT16>(100 + 40 * n)), b2 = make_frame(static_cast<UINT16>(120 + 40 * n));
+            uneven = u.take(a.data()) && uneven;
+            uneven = !u.take(a.data()) && uneven;
+            uneven = u.take(b2.data()) && uneven;
+        }
+        expect(uneven && u.cadence() == CadenceHold::Mode::Free, true, "hold: an uneven rate is compared frame by frame");
+        expect(u.take(make_frame(100 + 40 * 11 + 20).data()), false, "hold: (and a repeat there is dropped)");
+
+        // Without the hold nothing changes: a still picture after A A B B is all repeats.
+        RepeatFilter plain(PixelFormat::P010, W, H, 3, 100000);
+        for (int n = 0; n < 12; ++n) {
+            auto a = make_frame(static_cast<UINT16>(100 + 20 * n));
+            plain.take(a.data());
+            plain.take(a.data());
+        }
+        bool none = true;
+        auto rest = make_frame(320);
+        for (int n = 0; n < 8; ++n) none = !plain.take(rest.data()) && none;
+        expect(none, true, "no hold: a still picture's repeats are dropped as before");
     }
     {
         // NV12 (SDR): 8-bit luma, compared in 10-bit code values.

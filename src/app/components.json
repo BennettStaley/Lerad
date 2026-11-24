@@ -1,10 +1,10 @@
 {
-  "about": "The versions of the downloaded programs this Glasir was tested with (src/app/components.h). Written by tools/pin_components.py from an engine folder's components.ini.",
+  "about": "The versions of the downloaded programs this version of the app was tested with (src/app/components.h). Written by tools/pin_components.py from an engine folder's components.ini.",
   "mpv": {
-    "version": "20261113-git-fe753a7824",
-    "url": "https://github.com/zhongfly/mpv-winbuild/releases/download/2026-11-13-fe753a7824/mpv-x86_64-20261113-git-fe753a7824.7z",
-    "sha256": "7c2ed2075a4461df915b4902aba5dcd395a4f65f36c9c8cda30f5f0e50951d0c",
-    "size": 33944303
+    "version": "20261117-git-f92afa75cd",
+    "url": "https://github.com/zhongfly/mpv-winbuild/releases/download/2026-11-17-f92afa75cd/mpv-x86_64-20261117-git-f92afa75cd.7z",
+    "sha256": "4a9e2787d1913ffd923f2c96b474b80c8e804e9d1980c32f5ba8096d75251fb2",
+    "size": 33994669
   },
   "reshade": {
     "version": "6.8.0",
@@ -35,6 +35,24 @@
     "url": "https://github.com/NVIDIA/DLSS/raw/v310.9.16/lib/Windows_x86_64/rel/nvngx_dlss.dll",
     "sha256": "d00b5b0ab29c3ca101b70c3a5ecb3a01b7ef33766a3383a28a18623083e6123e",
     "size": 58956912
+  },
+  "dlssg": {
+    "version": "v310.9.16",
+    "url": "https://github.com/NVIDIA/DLSS/raw/v310.9.16/lib/Windows_x86_64/rel/nvngx_dlssg.dll",
+    "sha256": "8d59d49b36410dd6b62fef2503a5871d347415bd85d943fa0848563a95dd50c7",
+    "size": 7506544
+  },
+  "vfg": {
+    "version": "0.2.0.0",
+    "url": "https://pypi.nvidia.com/nvidia-vfx/nvidia_vfx-0.2.0.0-cp312-abi3-win_amd64.whl",
+    "sha256": "cebaa12411f7e22b39293205c5c4d07b8073d14ca1e0e7727ee4375207a36445",
+    "size": 435807359
+  },
+  "anr": {
+    "version": "FG-V.B20",
+    "url": "https://github.com/apex-compute/ANR/releases/download/FG-V.B20/anr-fg-V.B20-addon.zip",
+    "sha256": "750885d982b0e58e815004da698999f3b85f20c84a28c33cc15ae54e555f70ae",
+    "size": 4130422
   },
   "reshade_fxh": {
     "version": "ee30868",

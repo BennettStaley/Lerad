@@ -10,7 +10,7 @@
 #include <utility>
 #include <vector>
 
-namespace glasir {
+namespace app {
 
 struct HttpRequest {
     std::wstring url;
@@ -28,4 +28,4 @@ bool http_get(const HttpRequest &request, std::string &body, std::wstring &error
 // Saves the body of a 200 answer to file (replaced); false with error set.
 bool http_download(const HttpRequest &request, const std::wstring &file, std::wstring &error);
 
-}  // namespace glasir
+}  // namespace app

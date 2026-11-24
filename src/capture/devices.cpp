@@ -17,7 +17,7 @@
 
 using Microsoft::WRL::ComPtr;
 
-namespace glasir {
+namespace app {
 namespace {
 
 constexpr DWORD kVideoStream = static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM);
@@ -282,4 +282,4 @@ HRESULT open_reader(const CaptureDevice &device, const VideoMode &mode, ComPtr<I
     return hr;
 }
 
-}  // namespace glasir
+}  // namespace app

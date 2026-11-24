@@ -20,9 +20,12 @@ import os, sys, json
 import numpy as np
 from PIL import Image
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', '..', 'tools'))
+from app_name import APP_DIR  # the product's name, from the root CMakeLists.txt
+
 HERE = os.path.dirname(os.path.abspath(__file__))
-# Glasir's Captures folder (out/Glasir/Captures), or FG_CAP (e.g. a set that still has deleted captures).
-CAP = (os.environ.get('FG_CAP') or os.path.join(HERE, '..', '..', '..', 'out', 'Glasir', 'Captures')).rstrip('/\\')
+# The built app's Captures folder (in out/), or FG_CAP (e.g. a set that still has deleted captures).
+CAP = (os.environ.get('FG_CAP') or os.path.join(APP_DIR, 'Captures')).rstrip('/\\')
 ROIS = json.load(open(os.path.join(HERE, 'head_rois.json')))
 FAIL = ['20261028-210747-526', '20261028-210759-326', '20261028-210851-361', '20261028-210904-761']
 CONTROL = ['20261028-210811-627', '20261028-210824-361']  # no needle loss today; must not grow fake spikes

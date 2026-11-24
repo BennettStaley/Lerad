@@ -3,12 +3,15 @@
 // for a screen, a GPU, a card and settings.
 #include <cmath>
 #include <cstdio>
+#include <cwctype>
+#include <initializer_list>
 #include <string>
 #include <vector>
 
 #include "advice.h"
+#include "app_version.h"
 
-using namespace glasir;
+using namespace app;
 
 namespace {
 
@@ -135,9 +138,9 @@ int main() {
         expect(suggests(a, "capture-120", L"capture.fps=120") && suggests(a, "capture-120", L"capture.height=1440"),
                "a 120 Hz-capable screen and card: 1440p120 is offered for 120 Hz consoles");
         const AdviceItem *hdr = find_advice(a, "card-hdr-limit");
-        expect(hdr && hdr->severity == Sev::Info && hdr->text.find(L"2560x1440 at 60 fps") != std::wstring::npos &&
-                   hdr->text.find(L"3840x2160 at 30 fps") != std::wstring::npos &&
-                   hdr->text.find(L"3840x2160 at 144 fps") != std::wstring::npos,
+        expect(hdr && hdr->severity == Sev::Info && hdr->text.find(L"2560 x 1440 at 60 fps") != std::wstring::npos &&
+                   hdr->text.find(L"3840 x 2160 at 30 fps") != std::wstring::npos &&
+                   hdr->text.find(L"3840 x 2160 at 144 fps") != std::wstring::npos,
                "the card's HDR limit: 1440p60 (4K30 too), SDR up to 4K144");
         expect(!has(a, "vrr-off") && !has(a, "vrr-unknown") && !has(a, "screen-60hz") && !has(a, "dlss5-gpu"),
                "nothing to warn about");
@@ -149,7 +152,7 @@ int main() {
             if (rank(a.items[i - 1]) > rank(a.items[i])) expect(false, "items are sorted: problems first");
         }
         const std::wstring text = advice_text(a);
-        expect(text.find(L"Capture: NV12 2560x1440 at 60 fps, Media Foundation") != std::wstring::npos &&
+        expect(text.find(L"Capture: NV12 2560 x 1440 at 60 fps, Media Foundation") != std::wstring::npos &&
                    text.find(L"a 60 fps game at 120 fps (x2)") != std::wstring::npos &&
                    text.find(L"(rec-scaling)") != std::wstring::npos,
                "the advice as text");
@@ -252,8 +255,9 @@ int main() {
         in = desktop(screen(2560, 1440, 144));
         apply_override(in.settings, L"framegen.max_output_hz=100", error);
         a = advise(in);
-        expect(has(a, "screen-60hz") && find_advice(a, "screen-60hz")->text.find(L"max_output_hz") != std::wstring::npos,
-               "framegen.max_output_hz below 120: 60 fps not doubled, the setting named");
+        expect(has(a, "screen-60hz") &&
+                   find_advice(a, "screen-60hz")->text.find(L"the limit is 100 fps") != std::wstring::npos,
+               "a limit below 120: 60 fps not doubled, and the limit is what is named");
         in = desktop(screen(2560, 1440, 144));
         apply_override(in.settings, L"frames.dedup=0", error);
         a = advise(in);
@@ -273,7 +277,7 @@ int main() {
         in.display.vrr_max_hz = 144;
         Advice a = advise(in);
         expect(a.outcome.vrr == L"off" && has(a, "vrr-off") && find_advice(a, "vrr-off")->severity == Sev::Warning &&
-                   find_advice(a, "vrr-off")->text.find(L"FreeSync (48-144 Hz)") != std::wstring::npos &&
+                   find_advice(a, "vrr-off")->text.find(L"variable refresh (FreeSync, 48-144 Hz)") != std::wstring::npos &&
                    find_advice(a, "vrr-off")->text.find(L"NVIDIA Control Panel") != std::wstring::npos,
                "VRR switched off on an NVIDIA screen: a warning that says where to turn it on");
         apply_override(in.settings, L"display.vrr=on", error);
@@ -298,6 +302,19 @@ int main() {
         in.display.vrr_windowed = DisplayInfo::Tri::No;
         a = advise(in);
         expect(a.outcome.vrr == L"on" && has(a, "vrr-fullscreen-only"), "G-SYNC for full screen only: a warning");
+        // The driver's profile for mpv.exe says less than the global setting.
+        in.display.vrr_windowed = DisplayInfo::Tri::Yes;
+        in.display.gpu_vendor = kVendorNvidia;
+        expect(!has(advise(in), "vrr-program-profile"), "no profile for mpv: nothing said");
+        in.mpv_profile_vrr = 1;
+        in.mpv_profile = L"mpv";
+        a = advise(in);
+        expect(has(a, "vrr-program-profile") && !has(a, "vrr-fullscreen-only"),
+               "mpv's profile allows G-SYNC in full screen only: a warning");
+        in.mpv_profile_vrr = 2;
+        expect(!has(advise(in), "vrr-program-profile"), "mpv's profile allows it in a window: nothing said");
+        in.mpv_profile_vrr = -1;
+        in.display.vrr_windowed = DisplayInfo::Tri::No;
         in.display.found = false;
         a = advise(in);
         expect(a.outcome.vrr == L"unknown" && !has(a, "vrr-unknown") && a.outcome.picture_height == 0,
@@ -351,6 +368,31 @@ int main() {
         a = advise(in);
         expect(!a.outcome.dlss5 && has(a, "dlss5-not-downloaded") && !has(a, "dlss5-gpu"),
                "an RTX without the DLSS 5 download: off, and where to get it");
+        // DLSS Frame Generation as what makes the frames.
+        expect(!has(a, "framegen-dlss-gpu") && !has(a, "framegen-dlss-not-downloaded"),
+               APP_NAME "'s own frames: nothing said about DLSS Frame Generation");
+        in.settings.framegen_dlss = true;
+        expect(!has(advise(in), "framegen-dlss-gpu") && !has(advise(in), "framegen-dlss-not-downloaded"),
+               "DLSS Frame Generation on an RTX 50 with its download: nothing to say");
+        in.dlssfg_installed = false;
+        expect(has(advise(in), "framegen-dlss-not-downloaded"), "... without its download: said, with where to get it");
+        in.dlssfg_installed = true;
+        in.settings.framegen_dlss = false;
+        in.settings.framegen_anr = true;
+        expect(!has(advise(in), "framegen-anr-not-downloaded"), "Apex ANR chosen and downloaded: nothing said");
+        in.anr_installed = false;
+        expect(has(advise(in), "framegen-anr-not-downloaded"), "... without its download: said, with where to get it");
+        in.anr_installed = true;
+        in.settings.framegen_anr = false;
+        in.settings.framegen_dlss = true;
+        in.gpus = {gpu(L"NVIDIA GeForce RTX 3080", kVendorNvidia, 10000)};
+        in.gpu = choose_gpu(in.gpus, in.display.device, L"");
+        a = advise(in);
+        expect(has(a, "framegen-dlss-gpu") && !find_advice(a, "framegen-dlss-gpu")->suggest.empty(),
+               "DLSS Frame Generation on an RTX 30: " APP_NAME "'s own, and the setting to match");
+        in.settings.framegen_dlss = false;
+        in.gpus = {gpu(L"NVIDIA GeForce RTX 5070", kVendorNvidia, 12000)};
+        in.gpu = choose_gpu(in.gpus, in.display.device, L"");
         in.gpus.clear();
         in.gpu = choose_gpu(in.gpus, in.display.device, L"");
         a = advise(in);
@@ -424,7 +466,7 @@ int main() {
         a = advise(in);
         expect(a.outcome.capped && a.outcome.max_shown_hz == 100 && shown(a, 30)->multiplier == 3 &&
                    !shown(a, 30)->kept_even && has(a, "framegen-fewer-fit") &&
-                   find_advice(a, "framegen-fewer-fit")->text.find(L"max_output_hz = 100") != std::wstring::npos,
+                   find_advice(a, "framegen-fewer-fit")->text.find(L"over the limit of 100 fps") != std::wstring::npos,
                "a limit of 100 on 120 Hz: x3 (90), and why not x4");
         apply_override(in.settings, L"framegen.max_output_hz=90", error);
         a = advise(in);
@@ -502,7 +544,7 @@ int main() {
                "fit_to_screen: fitted to the peak the screen reports, which is said");
         apply_override(in.settings, L"hdr.display_peak_nits=800", error);
         a = advise(in);
-        expect(a.outcome.hdr_plan.peak_nits == 800 && !has(a, "hdr-fit-reported-peak"), "a peak from glasir.ini: used");
+        expect(a.outcome.hdr_plan.peak_nits == 800 && !has(a, "hdr-fit-reported-peak"), "a peak from " APP_INI ": used");
         apply_override(in.settings, L"hdr.display_peak_nits=0", error);
         in.display.peak_nits = 0;
         a = advise(in);
@@ -544,6 +586,61 @@ int main() {
         in.card_found = false;
         a = advise(in);
         expect(!has(a, "console-resolution") && has(a, "console-vrr"), "no card: no size to name");
+    }
+    {
+        // The words. The launcher shows these texts beside its controls: they
+        // name a control by its label and tab, never a key of the settings
+        // file, the file or a command line; and sizes are written "W x H".
+        // Settings that bring out the texts which used to name keys.
+        std::vector<AdviceInput> cases;
+        const auto with = [&](AdviceInput in, std::initializer_list<const wchar_t *> settings) {
+            for (const wchar_t *o : settings) apply_override(in.settings, o, error);
+            in.gpu = choose_gpu(in.gpus, in.display.device, in.settings.gpu);
+            cases.push_back(in);
+        };
+        const AdviceInput base = desktop(screen(2560, 1440, 120));
+        with(base, {});
+        with(base, {L"display.monitor=7", L"framegen.max_output_hz=100", L"framegen.multiplier=4", L"display.vrr=off"});
+        with(base, {L"frames.dedup=0", L"framegen.max_output_hz=240", L"display.gpu=Voodoo"});
+        with(base, {L"capture.path=directshow", L"framegen.backend=dlss"});
+        with(base, {L"video.mode=hdr", L"hdr.output=hdr", L"hdr.fit_to_screen=1", L"capture.width=3840",
+                    L"capture.height=2160", L"capture.fps=60", L"video.scaling=vsr"});
+        with(base, {L"video.mode=hdr", L"hdr.fit_to_screen=1", L"hdr.display_peak_nits=0", L"dlss5.enabled=on"});
+        cases[1].monitor_matched = false;
+        cases[3].dlssfg_installed = false;
+        cases[3].reshade_installed = false;
+        cases[4].display.hdr_on = false;
+        cases[5].display.peak_nits = 400;
+        AdviceInput laptop = base;
+        laptop.display.vrr = DisplayInfo::Vrr::Unknown;
+        laptop.gpus = {gpu(L"Intel(R) Iris(R) Xe Graphics", kVendorIntel, 128),
+                       gpu(L"NVIDIA GeForce RTX 4060 Laptop GPU", kVendorNvidia, 8000, false)};
+        with(laptop, {L"video.scaling=vsr"});
+        AdviceInput profile = base;
+        profile.mpv_profile_vrr = 1;
+        profile.mpv_profile = L"mpv";
+        with(profile, {});
+        AdviceInput no_card = base;
+        no_card.card_found = false;
+        with(no_card, {L"capture.device=Missing card"});
+        int texts = 0;
+        bool keys = false, sizes = false;
+        for (const AdviceInput &in : cases)
+            for (const AdviceItem &item : advise(in).items) {
+                ++texts;
+                for (const wchar_t *word : {L".ini", L"--", L" = ", L"max_output_hz", L"display.", L"capture.", L"video.",
+                                            L"framegen.", L"hdr.", L"frames.", L"dlss5.", L".exe", L".log", L"DirectShow",
+                                            L"dedup"})
+                    if (item.text.find(word) != std::wstring::npos) {
+                        keys = true;
+                        std::printf("  names a key, a file or a command: %s: %ls\n", item.id.c_str(), item.text.c_str());
+                    }
+                for (size_t at = item.text.find(L'x'); at != std::wstring::npos; at = item.text.find(L'x', at + 1))
+                    sizes = sizes || (at > 0 && at + 1 < item.text.size() && iswdigit(item.text[at - 1]) &&
+                                      iswdigit(item.text[at + 1]));
+            }
+        expect(texts > 60 && !keys, "no text names a key, a file, a command line or the capture's inner names");
+        expect(!sizes, "sizes are written with spaces: 3840 x 2160");
     }
 
     std::printf("%s\n", g_failures ? "FAILED" : "all passed");

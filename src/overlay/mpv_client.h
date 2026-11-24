@@ -10,17 +10,17 @@
 #include <thread>
 #include <vector>
 
-namespace glasir::overlay {
+namespace app::overlay {
 
 struct MpvState {
     bool connected = false;
     double volume = -1;  // -1: not known yet
     bool mute = false;
     bool fullscreen = false;
-    int boost = -1;   // the audio plugin's (user-data/glasir/audio-boost), -1: no plugin
+    int boost = -1;   // the audio plugin's (user-data/app/audio-boost), -1: no plugin
     int delay = -1;   // ms, likewise
     int width = 0, height = 0;  // the video's size
-    std::string scaling;        // glasir_scaling.lua's mode (user-data/glasir/scaling): mpv, fsr, vsr, cnn, anime4k
+    std::string scaling;        // scaling.lua's mode (user-data/app/scaling): mpv, fsr, vsr, cnn, anime4k
     // HDR, as mpv has it now.
     std::string hint_mode;     // target-colorspace-hint-mode: "source" (as the console sends it), "target" (fitted)
     int target_peak = 0;       // target-peak in nits; 0: auto
@@ -31,6 +31,9 @@ struct MpvState {
     // picture yet.
     std::string out_gamma;
     double out_peak = 0;
+    // What the console sends now, as the app found or was told
+    // (user-data/app/signal): "hdr" or "sdr". "": not said.
+    std::string signal;
     // osd-dimensions: the window's size and the black bars around the video
     // (margins left, top, right, bottom); w = 0 until known.
     struct Osd {
@@ -39,7 +42,7 @@ struct MpvState {
 };
 
 // A short message to show over the picture (a toast): from a key mpv
-// handled (volume, mute) or one sent with "script-message glasir-toast
+// handled (volume, mute) or one sent with "script-message app-toast
 // <text> [ms]". serial grows with each; 0: none yet.
 struct Toast {
     std::string text;
@@ -61,7 +64,7 @@ public:
     // Queues {"command":[words...]}; sent in order.
     void command(const std::vector<std::string> &words);
     Toast toast() const;
-    // How many times "script-message glasir-screenshot" (the s key) came.
+    // How many times "script-message app-screenshot" (the s key) came.
     unsigned screenshot_requests() const;
 
 private:
@@ -83,4 +86,4 @@ private:
 // One JSON string, quoted and escaped.
 std::string json_quote(const std::string &s);
 
-}  // namespace glasir::overlay
+}  // namespace app::overlay

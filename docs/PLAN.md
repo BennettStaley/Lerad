@@ -1,6 +1,6 @@
 # Project plan (v1)
 
-Name: Glasir.
+Name: Lerad.
 Decisions made 2026-10-31. This file is the reference for what v1 is and is not.
 
 Status (2026-11-01): all eight porting steps below are done; v1 is complete
@@ -52,7 +52,7 @@ Keep / build:
 - DLSS 5 with neural rendering on/off.
 - Upscaling: mpv's built-in scaling + FSR1 (any GPU); RTX VSR on NVIDIA.
   DLSS / FSR upscaling later, enabled by compatibility. *(done: [video]
-  scaling = mpv | fsr | vsr, glasir_scaling.lua + Glasir's own FSR 1 port;
+  scaling = mpv | fsr | vsr, scaling.lua + Lerad's own FSR 1 port;
   launcher and menu)* *(done: Intel VSR (d3d11vpp scaling-mode=intel), and
   cnn (ArtCNN C4F16 + FSR 1) and anime4k (Anime4K v4 mode A), vendored MIT
   shaders. Temporal upscalers (DLSS SR, FSR 2/3, XeSS) are left out: a
@@ -86,8 +86,8 @@ beyond what DLSS5_Feed needs.
 ## Third-party components
 
 Nothing third-party that is restricted goes into the repo or our release zip.
-Glasir's setup (in Glasir.exe) fetches on the user's PC, each in the version
-that Glasir was tested with (`src/app/components.json`, since 2026-11-14;
+Lerad's setup (in Lerad.exe) fetches on the user's PC, each in the version
+that Lerad was tested with (`src/app/components.json`, since 2026-11-14;
 before, the newest of each):
 
 | Component | Source |
@@ -126,31 +126,32 @@ Each step tested against the real capture card before the next:
 
 1. Repo skeleton, build scripts, licences/notices. *(done)*
 2. Capture (msc_hdr_capture: MF NV12/P010, dedup) + mpv launch, SDR and HDR,
-   DirectShow fallback. *(done: Glasir.exe replaces the two .bat launchers;
-   also YUY2/UYVY cards, automatic card and mode choice, glasir.ini)*
-3. Audio (msc_audio from z-er's source) + boost + delay. *(done: glasir_audio.dll,
+   DirectShow fallback. *(done: Lerad.exe replaces the two .bat launchers;
+   also YUY2/UYVY cards, automatic card and mode choice, lerad.ini)*
+3. Audio (msc_audio from z-er's source) + boost + delay. *(done: capture_audio.dll,
    based on z-er's public source; finds the card's audio input by itself)*
 4. Frame generation add-on + VRR hold + send-repeats. *(done: src/framegen, MPL-2.0;
    same shaders and scores as the prototype; VRR measurement tools not ported yet)*
 5. DLSS 5 (Feeder + RenoDX-DLSS5) wiring. *(done: download, [dlss5]
    auto/on/off with RTX 30/40/50 detection; nvngx_dlss.dll from NVIDIA's own SDK works)*
-6. Installer (component downloads) + settings file. *(done: Glasir.exe is its own
+6. Installer (component downloads) + settings file. *(done: Lerad.exe is its own
    installer: release zip, first start asks and downloads mpv, ReShade and DLSS 5
    (`--setup` to update); volume, boost and delay changed while playing are kept
-   in glasir.ini. mpv's options go on its command line from glasir.ini; mpv.conf
-   and input.conf are Glasir's own files. F6/F8 stay session toggles; DLSS 5
+   in lerad.ini. mpv's options go on its command line from lerad.ini; mpv.conf
+   and input.conf are Lerad's own files. F6/F8 stay session toggles; DLSS 5
    tuning in the ReShade overlay stays in ReShade.ini, starting from its
    authors' defaults)*
 7. Launcher + in-game menu (after-effects overlay prototype first). *(done: the menu
    (src/overlay, Dear ImGui) is drawn by the frame generation add-on on every
    presented frame, after DLSS 5 and frame generation, and built again for each;
-   it saves to glasir.ini, switches SDR/HDR by restarting the picture (mpv exit
-   code 42). The launcher is Glasir.exe's own window (Dear ImGui on D3D11),
+   it saves to lerad.ini, switches SDR/HDR by restarting the picture (mpv exit
+   code 42). The launcher is Lerad.exe's own window (Dear ImGui on D3D11),
    [launcher] show / Shift / --play. The key-press OSD texts (volume,
    boost, F8...) go through mpv's OSD, so through DLSS 5 and frame generation;
    they could move into the overlay)* *(done: toasts drawn by the overlay;
-   input.conf uses no-osd, everything else sends script-message glasir-toast)*
+   input.conf uses no-osd, everything else sends script-message app-toast)*
 8. Update check / self-update, bug-report capture, docs. *(done: update
    check in the launcher + `--update`, self-update from the release zip with
    SHA-256 and rollback; F9 / launcher / `--bug-report` save a zip with logs,
-   settings, system and F9 frames; README sections + docs/TROUBLESHOOTING.md)*
+   settings, system and JPEG pictures of the F9 frames (the frames stay in
+   Captures); README sections + docs/TROUBLESHOOTING.md)*

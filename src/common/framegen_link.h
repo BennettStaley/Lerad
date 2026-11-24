@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// What Glasir's capture tells the frame generation add-on inside mpv.
+// What the app's capture tells the frame generation add-on inside mpv.
 //
 // The capture side creates this block (with dedup on) under a name built from
 // mpv's process id, so it belongs to that one mpv and nothing it starts. The
@@ -20,11 +20,13 @@
 #pragma once
 #include <windows.h>
 
-#define GLASIR_FRAMEGEN_LINK_NAME L"Local\\Glasir_FrameGen_%lu"  // %lu = mpv's process id
-#define GLASIR_FRAMEGEN_LINK_MAGIC 0x46534C47u                  // 'GLSF'
-#define GLASIR_FRAMEGEN_LINK_VERSION 1u
+#include "app_version.h"
 
-struct GlasirFrameGenLink {
+#define APP_FRAMEGEN_LINK_NAME L"Local\\" APP_NAME_W L"_FrameGen_%lu"  // %lu = mpv's process id
+#define APP_FRAMEGEN_LINK_MAGIC 0x46534C47u                  // 'GLSF'
+#define APP_FRAMEGEN_LINK_VERSION 1u
+
+struct FrameGenLink {
     static constexpr int kStamps = 16;
 
     UINT32 magic;

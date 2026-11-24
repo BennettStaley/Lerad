@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 // AMD FidelityFX Super Resolution 1 (FSR 1) for mpv: EASU (edge-adaptive
-// upscaling) to the window's size, then RCAS (sharpening). Ported for Glasir
+// upscaling) to the window's size, then RCAS (sharpening). Ported for this app
 // from AMD's ffx_fsr1.h (FidelityFX-FSR v1.0.2, the 32-bit float paths):
 // https://github.com/GPUOpen-Effects/FidelityFX-FSR
 //
@@ -39,11 +39,11 @@
 
 //!HOOK MAIN
 //!BIND HOOKED
-//!SAVE GLASIR_EASU
+//!SAVE EASU
 //!WIDTH OUTPUT.w
 //!HEIGHT OUTPUT.h
 //!WHEN OUTPUT.w HOOKED.w > OUTPUT.h HOOKED.h > +
-//!DESC Glasir FSR 1 EASU
+//!DESC FSR 1 EASU
 
 float rcp_lo(float a) { return 1.0 / max(a, 1.0e-5); }
 float rsq_lo(float a) { return inversesqrt(max(a, 1.0e-5)); }
@@ -140,15 +140,15 @@ vec4 hook() {
 }
 
 //!HOOK MAIN
-//!BIND GLASIR_EASU
-//!WIDTH GLASIR_EASU.w
-//!HEIGHT GLASIR_EASU.h
+//!BIND EASU
+//!WIDTH EASU.w
+//!HEIGHT EASU.h
 //!WHEN OUTPUT.w MAIN.w > OUTPUT.h MAIN.h > +
-//!DESC Glasir FSR 1 RCAS
+//!DESC FSR 1 RCAS
 
 #define RCAS_LIMIT (0.25 - (1.0 / 16.0))
 
-vec3 at(float x, float y) { return GLASIR_EASU_texOff(vec2(x, y)).rgb; }
+vec3 at(float x, float y) { return EASU_texOff(vec2(x, y)).rgb; }
 
 vec4 hook() {
     //    b

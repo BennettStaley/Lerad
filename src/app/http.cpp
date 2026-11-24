@@ -6,10 +6,10 @@
 #include <format>
 #include <fstream>
 
-#include "glasir_version.h"
+#include "app_version.h"
 #include "log.h"
 
-namespace glasir {
+namespace app {
 namespace {
 
 struct Handle {
@@ -52,7 +52,7 @@ bool transfer(const HttpRequest &r, const std::function<bool(const char *, DWORD
         error = L"not an https address: " + r.url;
         return false;
     }
-    const std::wstring agent = std::format(L"Glasir/{}", widen(GLASIR_VERSION));
+    const std::wstring agent = std::format(APP_NAME_W L"/{}", widen(APP_VERSION));
     Handle session(WinHttpOpen(agent.c_str(), WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME,
                                WINHTTP_NO_PROXY_BYPASS, 0));
     if (!session.h) {
@@ -157,4 +157,4 @@ bool http_download(const HttpRequest &request, const std::wstring &file, std::ws
     return ok;
 }
 
-}  // namespace glasir
+}  // namespace app

@@ -4,11 +4,12 @@
 #include <algorithm>
 #include <format>
 
+#include "app_version.h"
 #include "hdr.h"
 #include "json.h"
 #include "log.h"
 
-namespace glasir {
+namespace app {
 namespace {
 
 std::wstring fps_text(double fps) {
@@ -18,36 +19,71 @@ std::wstring fps_text(double fps) {
     return s;
 }
 
+}  // namespace
+
+std::optional<PictureMode> picture_mode(const std::string &word) {
+    if (word == "auto") return PictureMode::Auto;
+    if (word == "sdr") return PictureMode::Sdr;
+    if (word == "hdr") return PictureMode::Hdr;
+    return std::nullopt;
+}
+
+const wchar_t *picture_mode_name(PictureMode mode) {
+    return mode == PictureMode::Auto ? L"auto" : mode == PictureMode::Hdr ? L"hdr" : L"sdr";
+}
+
+bool shown_as_hdr(PictureMode mode, bool found_hdr) {
+    return mode == PictureMode::Auto ? found_hdr : mode == PictureMode::Hdr;
+}
+
 // The colour tags raw frames need: they carry none of their own. SDR from
 // consoles is BT.709; 4:2:0 from cards (NV12, and P010 with an SDR signal in
 // it) is sited top-left, 4:2:2 left. HDR is HDR10 (BT.2020, PQ, limited
-// range) with the peak from glasir.ini as its mastering peak and MaxCLL: mpv
+// range) with the peak from the settings file as its mastering peak and MaxCLL: mpv
 // passes them on as the swap chain's metadata and starts tone mapping from
-// them. glasir_scaling.lua puts the same tags back after the GPU's video
-// super resolution.
-std::wstring colour_filter(const MpvPlan &plan, const Settings &s) {
-    if (s.hdr)
-        return std::format(L"format=colormatrix=bt.2020-ncl:colorlevels=limited:primaries=bt.2020:gamma=pq:"
-                           L"max-luma={0}:max_cll={0}",
+// them. scaling.lua puts the same tags back after the GPU's video
+// super resolution. The label is what lets the filter be replaced while
+// playing ("vf add @label:..." puts the new one in its place).
+std::wstring colour_filter(const MpvPlan &plan, const Settings &s, bool hdr) {
+    if (hdr)
+        return std::format(L"@app-colour:format=colormatrix=bt.2020-ncl:colorlevels=limited:primaries=bt.2020:"
+                           L"gamma=pq:max-luma={0}:max_cll={0}",
                            s.hdr_peak_nits);
     const wchar_t *siting = is_planar(plan.layout.format) ? L"uhd" : L"mpeg2/4/h264";
-    return std::format(L"format=colormatrix=bt.709:colorlevels={}:primaries=bt.709:chroma-location={}",
+    return std::format(L"@app-colour:format=colormatrix=bt.709:colorlevels={}:primaries=bt.709:chroma-location={}",
                        s.sdr_full_range ? L"full" : L"limited", siting);
 }
 
-}  // namespace
+// Seen with mpv 0.42 on a desktop with HDR on (2026-11-18): the swap chain
+// follows target-colorspace-hint within the second, HDR10 with yes and sRGB
+// with no, whether mpv started with --d3d11-output-csp=srgb (an SDR start)
+// or pq (an HDR one), and ReShade keeps running. d3d11-output-csp is never
+// set while playing: mpv then builds its output again, ReShade and all
+// (about 9 s when that was tried, 2026-11-17). Not tried: a desktop with HDR
+// off and [hdr] output = hdr, where a start in HDR forces PQ with that option
+// and a switch while playing cannot. The order: the tags, then the filters
+// that depend on them, then the output.
+std::string picture_commands(const MpvPlan &plan, const Settings &s, bool hdr) {
+    const wchar_t *signal = hdr ? L"hdr" : L"sdr";
+    std::string commands = ipc_command({L"vf", L"add", colour_filter(plan, s, hdr)}) +
+                           ipc_command({L"script-message", L"app-signal", signal});
+    for (const auto &[name, value] : hdr_live_properties(hdr_plan(s, plan.display), s, hdr))
+        commands += ipc_command({L"set", name, value});
+    return commands + ipc_command({L"set", L"user-data/app/signal", signal});
+}
 
 std::vector<std::wstring> mpv_arguments(const MpvPlan &plan, const Settings &s) {
     std::vector<std::wstring> a = {
         // Start idle with the window up, so ReShade is loaded before
-        // playback; Glasir then loads the source over IPC.
+        // playback; the app then loads the source over IPC.
         L"--idle=yes",
         L"--force-window=immediate",
         L"--no-terminal",
         L"--config-dir=" + plan.config_dir,
         L"--input-ipc-server=" + plan.ipc_pipe,
-        L"--title=Glasir",
+        L"--title=" APP_NAME_W,
         L"--screenshot-dir=" + plan.screenshot_dir,
+        L"--screenshot-template=" APP_NAME_W L"_%tY-%tm-%td_%tH%tM%tS",
         // Low latency: no buffering, show each frame as it arrives.
         L"--profile=low-latency",
         L"--untimed",
@@ -84,12 +120,12 @@ std::vector<std::wstring> mpv_arguments(const MpvPlan &plan, const Settings &s) 
     if (!plan.log_file.empty()) a.push_back(L"--log-file=" + plan.log_file);
     if (!plan.d3d11_adapter.empty()) a.push_back(L"--d3d11-adapter=" + plan.d3d11_adapter);
 
-    // Sound: glasir_audio.dll (portable_config\scripts) plays the card's
+    // Sound: capture_audio.dll (portable_config\scripts) plays the card's
     // audio input; mpv's volume and mute drive it.
     a.push_back(std::format(L"--volume={}", s.volume));
     a.push_back(L"--volume-max=100");
     auto opt = [&](const std::wstring &key, const std::wstring &value) {
-        a.push_back(L"--script-opts-append=glasir_audio-" + key + L"=" + value);
+        a.push_back(L"--script-opts-append=capture_audio-" + key + L"=" + value);
     };
     opt(L"device", plan.audio_device);
     opt(L"delay", std::to_wstring(s.audio_delay_ms));
@@ -98,9 +134,9 @@ std::vector<std::wstring> mpv_arguments(const MpvPlan &plan, const Settings &s) 
     if (!plan.audio_log.empty()) opt(L"log", plan.audio_log);
     if (plan.audio_missing) opt(L"missing", L"1");
 
-    // Scaling up (portable_config\scripts\glasir_scaling.lua).
+    // Scaling up (portable_config\scripts\scaling.lua).
     auto scaling = [&](const std::wstring &key, const std::wstring &value) {
-        a.push_back(L"--script-opts-append=glasir_scaling-" + key + L"=" + value);
+        a.push_back(L"--script-opts-append=scaling-" + key + L"=" + value);
     };
     scaling(L"mode", scaling_name(s.scaling));
     scaling(L"vsr", plan.vsr);
@@ -114,10 +150,10 @@ std::vector<std::wstring> mpv_arguments(const MpvPlan &plan, const Settings &s) 
         a.push_back(std::format(L"--demuxer-rawvideo-h={}", plan.layout.height));
         a.push_back(std::format(L"--demuxer-rawvideo-mp-format={}", mpv_format_name(plan.layout.format)));
         a.push_back(L"--demuxer-rawvideo-fps=" + fps_text(plan.fps));
-        a.push_back(L"--vf=" + colour_filter(plan, s));
+        a.push_back(L"--vf=" + colour_filter(plan, s, s.hdr));
     } else {
         a.push_back(L"--demuxer-lavf-o-append=rtbufsize=64M");
-        // The mode from the card's list, or else what glasir.ini asks for.
+        // The mode from the card's list, or else what the settings file asks for.
         const UINT32 width = plan.dshow_mode ? plan.dshow_mode->width : s.width;
         const UINT32 height = plan.dshow_mode ? plan.dshow_mode->height : s.height;
         const double fps = plan.dshow_mode ? plan.dshow_mode->fps : s.fps;
@@ -136,7 +172,7 @@ std::vector<std::wstring> mpv_arguments(const MpvPlan &plan, const Settings &s) 
     }
     if (s.hdr) {
         // HDR10 to the screen or tone mapped to SDR, as hdr.h decides from
-        // glasir.ini's [hdr] and the screen.
+        // the settings file's [hdr] and the screen.
         for (auto &option : hdr_mpv_options(hdr_plan(s, plan.display), s)) a.push_back(std::move(option));
     } else {
         // An SDR swap chain, said outright: mpv's own choice follows the
@@ -216,8 +252,8 @@ MpvProcess::~MpvProcess() {
 
 bool MpvProcess::start(const std::wstring &command_line, bool feed_stdin, std::wstring &error) {
     // mpv holds the card (DirectShow) or the frame pipe: it must not outlive
-    // Glasir, so it runs in a job that ends it when Glasir's handle closes,
-    // even if Glasir crashes.
+    // the app, so it runs in a job that ends it when the app's handle closes,
+    // even if the app crashes.
     job_ = CreateJobObjectW(nullptr, nullptr);
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
     limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
@@ -261,7 +297,7 @@ bool MpvProcess::start(const std::wstring &command_line, bool feed_stdin, std::w
     if (!AssignProcessToJobObject(job_, pi_.hProcess)) {
         const DWORD assign_err = GetLastError();
         TerminateProcess(pi_.hProcess, 1);  // still suspended: it never ran
-        error = std::format(L"Could not put mpv in Glasir's job object (error {}).", assign_err);
+        error = std::format(L"Could not put mpv in " APP_NAME_W L"'s job object (error {}).", assign_err);
         close_stdin();
         return false;
     }
@@ -463,4 +499,4 @@ std::optional<std::string> MpvWatch::changed(const std::string &property) const 
     return std::nullopt;
 }
 
-}  // namespace glasir
+}  // namespace app

@@ -1,13 +1,17 @@
 // SPDX-License-Identifier: MIT
 #include "system_report.h"
 
+#include <algorithm>
 #include <cmath>
 #include <format>
 #include <optional>
 
+#include "app_version.h"
+#include "components.h"
 #include "reshade_config.h"
+#include "vrr.h"
 
-namespace glasir {
+namespace app {
 namespace {
 
 std::wstring rate(double fps) {
@@ -41,6 +45,37 @@ SystemInfo survey_system(const Settings &s) {
     return info;
 }
 
+namespace {
+
+// The driver's settings for mpv.exe, asked for at most every ten seconds:
+// the launcher works the advice out again on every change of a setting, and
+// the driver takes some tens of milliseconds to answer.
+SRWLOCK g_profile_lock = SRWLOCK_INIT;
+std::wstring g_profile_exe;
+NvidiaAppVrr g_profile;
+ULONGLONG g_profile_at = 0;
+
+NvidiaAppVrr mpv_profile(const std::wstring &exe) {
+    AcquireSRWLockExclusive(&g_profile_lock);
+    const ULONGLONG now = GetTickCount64();
+    if (g_profile_at == 0 || g_profile_exe != exe || now - g_profile_at > 10'000) {
+        g_profile = read_nvidia_app_vrr(exe);
+        g_profile_exe = exe;
+        g_profile_at = now ? now : 1;
+    }
+    const NvidiaAppVrr out = g_profile;
+    ReleaseSRWLockExclusive(&g_profile_lock);
+    return out;
+}
+
+}  // namespace
+
+void forget_mpv_profile() {
+    AcquireSRWLockExclusive(&g_profile_lock);
+    g_profile_at = 0;
+    ReleaseSRWLockExclusive(&g_profile_lock);
+}
+
 AdviceInput advice_input(const Settings &s, const SystemInfo &system, const std::vector<CaptureDevice> &cards,
                          const std::wstring &engine_dir) {
     AdviceInput in;
@@ -51,8 +86,18 @@ AdviceInput advice_input(const Settings &s, const SystemInfo &system, const std:
     in.gpu = system.gpu;
     in.reshade_installed = reshade_installed(engine_dir);
     in.dlss5_installed = dlss5_installed(engine_dir);
+    in.dlssfg_installed = component_installed(engine_dir, Component::DlssFg);
+    in.video_installed = component_installed(engine_dir, Component::Video);
+    in.anr_installed = component_installed(engine_dir, Component::Anr);
+    if (system.display.gpu_vendor == kVendorNvidia) {
+        const NvidiaAppVrr profile = mpv_profile(engine_dir + L"\\mpv.exe");
+        if (profile.read && profile.has_profile && profile.mode >= 0 && profile.requested >= 0) {
+            in.mpv_profile_vrr = std::min(profile.mode, profile.requested);
+            in.mpv_profile = profile.profile;
+        }
+    }
 
-    // The card as Glasir.exe finds it: one that has the mode asked for, else
+    // The card as the exe finds it: one that has the mode asked for, else
     // (so the advice can say what it lacks) the one named, or any card.
     ModeRequest request;
     request.hdr = s.hdr;
@@ -82,7 +127,7 @@ std::wstring card_summary(const CaptureDevice &card) {
     std::wstring t = card.name + L": ";
     const auto best_sdr = largest(card.modes, sdr), best_hdr = largest(card.modes, hdr),
                best_hdr60 = largest(card.modes, hdr60);
-    t += best_sdr ? L"SDR up to " + mode_text(*best_sdr) + L" (" + best_sdr->subtype + L")" : L"no SDR mode Glasir reads";
+    t += best_sdr ? L"SDR up to " + mode_text(*best_sdr) + L" (" + best_sdr->subtype + L")" : L"no SDR mode " APP_NAME_W L" reads";
     if (best_hdr60) {
         t += L"; HDR up to " + mode_text(*best_hdr60);
         if (best_hdr->width * best_hdr->height > best_hdr60->width * best_hdr60->height)
@@ -110,7 +155,7 @@ std::wstring system_report(const SystemInfo &system, const std::vector<CaptureDe
     t += L"Screens:\n";
     for (const DisplayInfo &d : system.displays) {
         t += std::format(L"  {}{}: {}", d.number, d.primary ? L" (main)" : L"", display_text(d));
-        if (d.device == system.display.device) t += L"  <- Glasir plays here";
+        if (d.device == system.display.device) t += L"  <- " APP_NAME_W L" plays here";
         t += L"\n";
     }
     if (system.displays.empty()) t += L"  none found\n";
@@ -123,4 +168,4 @@ std::wstring system_report(const SystemInfo &system, const std::vector<CaptureDe
     return t;
 }
 
-}  // namespace glasir
+}  // namespace app

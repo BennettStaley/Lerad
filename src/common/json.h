@@ -8,7 +8,7 @@
 #include <utility>
 #include <vector>
 
-namespace glasir {
+namespace app {
 
 class Json {
 public:
@@ -44,4 +44,4 @@ private:
     std::vector<std::pair<std::string, Json>> members_;
 };
 
-}  // namespace glasir
+}  // namespace app

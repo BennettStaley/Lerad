@@ -10,10 +10,11 @@
 #include <limits>
 
 #include "../src/audio/audio_core.h"
+#include "app_version.h"
 #include "audio_endpoint.h"
 
-using namespace glasir;
-using namespace glasir::audio;
+using namespace app;
+using namespace app::audio;
 
 namespace {
 
@@ -72,6 +73,41 @@ int main() {
     expect(output_gain(150, 100, false) == 1.0, "gain: volume capped at 100 %");
     expect(output_gain(100, 400, true) == 0.0, "gain: muted");
 
+    // A break in the sound: no step larger than a slow fade's between two
+    // samples, where a hard cut would step by the full level.
+    Smooth smooth(48000);
+    float before = 0, worst = 0;
+    auto step = [&](Stereo s) {
+        worst = std::max(worst, std::abs(s.left - before));
+        before = s.left;
+    };
+    for (int n = 0; n < 480; ++n) step(smooth.play({.5f, .5f}));
+    expect(std::abs(before - .5f) < 1e-6 && worst < .003, "sound comes in over 5 ms");
+    worst = 0;
+    for (int n = 0; n < 1920; ++n) step(smooth.gap());
+    expect(before == 0 && worst < .006, "a gap: the level dies away, then silence");
+    for (int n = 0; n < 480; ++n) step(smooth.play({.5f, .5f}));
+    smooth.cut();
+    worst = 0;
+    for (int n = 0; n < 1920; ++n) step(smooth.play({-.5f, -.5f}));
+    expect(std::abs(before + .5f) < 1e-4 && worst < .009, "a jump in the sound is faded across");
+
+    Margin margin(48000);
+    expect(margin.samples() == 240, "spare queue: 5 ms to start");
+    margin.ran_dry(1000, 14);
+    expect(margin.samples() == 432, "ran dry on a late packet: 4 ms more");
+    margin.ran_dry(2000, 500);
+    expect(margin.samples() == 432, "ran dry in a stall: no more");
+    for (int n = 0; n < 20; ++n) margin.ran_dry(3000, 14);
+    expect(margin.samples() == 1920, "never more than 40 ms");
+    for (double t = 3000; t <= 3000 + 600000; t += 1000) margin.left(t, 100);
+    expect(margin.samples() == 1920, "ten quiet minutes with the spare in use: it stays");
+    for (double t = 700000; t <= 700000 + 601000; t += 1000) margin.left(t, 1000);
+    expect(margin.samples() == 1872, "ten quiet minutes with it unused: 1 ms less");
+    Margin small(48000);
+    for (double t = 0; t <= 601000; t += 1000) small.left(t, 5000);
+    expect(small.samples() == 240, "never less than it started with");
+
     expect(card_base_name(L"Live Gamer Ultra 2.1-Video") == L"Live Gamer Ultra 2.1", "card name without -Video");
     expect(card_base_name(L"Game Capture HD60 X (Video)") == L"Game Capture HD60 X", "card name without (Video)");
     expect(card_base_name(L"USB Video") == L"USB", "card name without Video");
@@ -98,8 +134,8 @@ int main() {
     expect(pick(L"Live Gamer Ultra 2.1-Video", builtin, L"") == L"lgu", "built-in container: by name");
     expect(pick(L"Game Capture 4K60 Pro MK.2", builtin, L"") == L"elg", "PCIe card: by name");
     expect(pick(L"Video (00 Pro Capture HDMI 4K+ LT)", builtin, L"") == L"mw", "Magewell PCIe card: by name");
-    expect(pick(L"Live Gamer Ultra 2.1-Video", builtin, L"Headset") == L"mic", "glasir.ini names another input");
-    expect(pick(L"Live Gamer Ultra 2.1-Video", builtin, L"No Such Input") == L"none", "glasir.ini input missing");
+    expect(pick(L"Live Gamer Ultra 2.1-Video", builtin, L"Headset") == L"mic", APP_INI " names another input");
+    expect(pick(L"Live Gamer Ultra 2.1-Video", builtin, L"No Such Input") == L"none", APP_INI " input missing");
 
     std::printf(g_failures ? "\n%d FAILED\n" : "\nall passed\n", g_failures);
     return g_failures ? 1 : 0;

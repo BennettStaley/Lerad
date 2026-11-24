@@ -5,10 +5,10 @@
 // Copyright (c) 2026 Abhito
 // fg_interp.h - the frame between two real frames.
 //
-// Shared by the add-on (glasir_framegen.cpp) and its offline evaluator
+// Shared by the add-on (framegen_addon.cpp) and its offline evaluator
 // (eval/fg_eval.cpp), so what is measured is what runs. The caller owns the
 // device context and its state: draw() changes pipeline state freely (within
-// the slots StateBackup in glasir_framegen.cpp covers), so the add-on saves and
+// the slots StateBackup in framegen_addon.cpp covers), so the add-on saves and
 // restores around it.
 //
 // Two methods:
@@ -17,6 +17,12 @@
 //           motion both ways found coarse to fine, the motion at the frame in
 //           between picked from those, and each pixel drawn from both frames
 //           along the motion that makes them agree there.
+//
+// A frame with black bars around the picture (a 16:9 game on a 21:9 screen):
+// given the picture's place (Picture), the motion method works on the picture
+// alone. A bar stands still, and the blocks that straddle it stood still with
+// it; the picture's edge is then the frame's edge to every pass, and the bars
+// cost no time. What lies outside the picture is drawn as frame a has it.
 
 #pragma once
 #include <d3d11.h>
@@ -34,11 +40,13 @@
 #include "luma0_cs.h"
 #include "median_cs.h"
 #include "mid_cs.h"
+#include "hold_cs.h"
 #include "search_cs.h"
 #include "stats_cs.h"
 #include "ratio_cs.h"
 #include "mgain_cs.h"
 #include "cut_cs.h"
+#include "vectors_ps.h"
 #include "warp_ps.h"
 #include "ldom_cs.h"
 #include "lmargin_cs.h"
@@ -62,9 +70,37 @@ using Microsoft::WRL::ComPtr;
 
 enum class Method { blend, motion };
 
+// The picture inside the frame, in pixels: [x0, x1) by [y0, y1). All 0: the
+// whole frame.
+struct Picture {
+    UINT x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+    bool operator==(const Picture &o) const { return x0 == o.x0 && y0 == o.y0 && x1 == o.x1 && y1 == o.y1; }
+};
+
+// The block motion from frame a to frame b that the last motion draw (or
+// find_flow) found, for a pass outside this class (fg_hud.h): one vector per
+// 16 px cell of the picture, by a's cells.
+struct BlockMotion {
+    ID3D11ShaderResourceView *field = nullptr;  // R32G32_FLOAT, grid_w x grid_h; null: none was found
+    UINT grid_w = 0, grid_h = 0;
+    float to_frame = 2.0f;                      // its units to frame pixels
+    Picture picture;                            // what it covers (all 0: the whole frame)
+    // Of a motion draw only (null after find_flow): flow.hlsl's STATS_*, and
+    // the shares of unmatched cells above which the draw took the pair for a cut.
+    ID3D11ShaderResourceView *stats = nullptr;
+    float cut_fraction = 0, cut_detailed = 0;
+};
+
 struct DrawOptions {
     Method method = Method::motion;
     float t = 0.5f;             // 0 = frame a, 1 = frame b
+    // Several frames between one pair (x3: two, x4: three): this one is
+    // `index` of the `multiplier - 1`, and same_pair says a and b are the
+    // frames of the draw before it. For fg_vfg.h, which keeps what it has of
+    // the pair; Interpolator goes by t.
+    int index = 1, multiplier = 2;
+    bool same_pair = false;
+    bool follows = false;       // a is the b of the pair keep_history() was last called for
     bool marker = false;        // debug square in the top-left corner
     float marker_level = 0.5f;  // its brightness in the target's encoding
 };
@@ -75,9 +111,19 @@ public:
     static constexpr int kBlock = 8;
     static constexpr int kMidBlock = 8;  // flow.hlsl's MID_BLOCK (4 was tried: noisier, worse on the clips)
 
-    bool create(ID3D11Device *device, UINT width, UINT height, std::string &error) {
+    // width x height: the frames given to draw(). picture: where the picture
+    // is in them (one that is not inside the frame, or is all of it: none).
+    bool create(ID3D11Device *device, UINT width, UINT height, std::string &error, const Picture &picture = {}) {
         release();
         device_ = device;
+        frame_w_ = width;
+        frame_h_ = height;
+        if (picture.x0 < picture.x1 && picture.y0 < picture.y1 && picture.x1 <= width && picture.y1 <= height &&
+            (picture.x1 - picture.x0 < width || picture.y1 - picture.y0 < height)) {
+            picture_ = picture;
+            width = picture.x1 - picture.x0;
+            height = picture.y1 - picture.y0;
+        }
         width_ = width;
         height_ = height;
         HRESULT hr = S_OK;
@@ -90,11 +136,20 @@ public:
         check(device->CreateVertexShader(g_blend_vs, sizeof(g_blend_vs), nullptr, &vs_), "vertex shader");
         check(device->CreatePixelShader(g_blend_ps, sizeof(g_blend_ps), nullptr, &blend_ps_), "blend shader");
         check(device->CreatePixelShader(g_warp_ps, sizeof(g_warp_ps), nullptr, &warp_ps_), "warp shader");
+        check(device->CreatePixelShader(g_vectors_ps, sizeof(g_vectors_ps), nullptr, &vectors_ps_), "vectors shader");
+        {
+            D3D11_BUFFER_DESC vd{};
+            vd.ByteWidth = sizeof(VectorsParams);
+            vd.Usage = D3D11_USAGE_DEFAULT;
+            vd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+            check(device->CreateBuffer(&vd, nullptr, &vectors_cb_), "vectors constant buffer");
+        }
         check(device->CreateComputeShader(g_luma0_cs, sizeof(g_luma0_cs), nullptr, &luma0_cs_), "luma shader");
         check(device->CreateComputeShader(g_lumadown_cs, sizeof(g_lumadown_cs), nullptr, &lumadown_cs_), "pyramid shader");
         check(device->CreateComputeShader(g_search_cs, sizeof(g_search_cs), nullptr, &search_cs_), "search shader");
         check(device->CreateComputeShader(g_median_cs, sizeof(g_median_cs), nullptr, &median_cs_), "median shader");
         check(device->CreateComputeShader(g_mid_cs, sizeof(g_mid_cs), nullptr, &mid_cs_), "mid shader");
+        check(device->CreateComputeShader(g_hold_cs, sizeof(g_hold_cs), nullptr, &hold_cs_), "hold shader");
         check(device->CreateComputeShader(g_stats_cs, sizeof(g_stats_cs), nullptr, &stats_cs_), "stats shader");
         check(device->CreateComputeShader(g_cut_cs, sizeof(g_cut_cs), nullptr, &cut_cs_), "cut shader");
         check(device->CreateComputeShader(g_ratio_cs, sizeof(g_ratio_cs), nullptr, &ratio_cs_), "ratio shader");
@@ -141,6 +196,7 @@ public:
             check(make(l.gw, l.gh, DXGI_FORMAT_R32G32_FLOAT, l.fwd), "field");
             check(make(l.gw, l.gh, DXGI_FORMAT_R32G32_FLOAT, l.bwd), "field");
             check(make(l.gw, l.gh, DXGI_FORMAT_R32G32_FLOAT, l.raw), "field");
+            check(make(l.gw, l.gh, DXGI_FORMAT_R32G32_FLOAT, l.hist), "field");
             ++levels_;
             w = (w + 1) / 2;
             h = (h + 1) / 2;
@@ -154,6 +210,8 @@ public:
             check(make(mid_w_, mid_h_, DXGI_FORMAT_R32G32_FLOAT, mid_), "mid field");
             check(make(mid_w_, mid_h_, DXGI_FORMAT_R32G32_FLOAT, mid_raw_), "mid field");
             check(make(mid_w_, mid_h_, DXGI_FORMAT_R32G32_FLOAT, mid_cost_), "mid cost");
+            check(make(mid_w_, mid_h_, DXGI_FORMAT_R32_FLOAT, mid_still_), "mid still");
+            check(make(mid_w_, mid_h_, DXGI_FORMAT_R32G32_FLOAT, hold_), "held field");
             check(make(level_[0].gw, level_[0].gh, DXGI_FORMAT_R32_FLOAT, ratio_), "ratios");
             check(make(4, 1, DXGI_FORMAT_R32_FLOAT, stats_), "stats");
             // Motion layers.
@@ -186,6 +244,7 @@ public:
         search_cs_.Reset();
         median_cs_.Reset();
         mid_cs_.Reset();
+        hold_cs_.Reset();
         stats_cs_.Reset();
         cut_cs_.Reset();
         ratio_cs_.Reset();
@@ -207,20 +266,34 @@ public:
         largs2_ = RawBuffer{};
         cb_.Reset();
         blend_cb_.Reset();
+        vectors_cb_.Reset();
+        vectors_ps_.Reset();
         linear_.Reset();
         for (auto &l : level_) l = Level{};
         mid_ = Surface{};
         mid_raw_ = Surface{};
         mid_cost_ = Surface{};
+        mid_still_ = Surface{};
+        hold_ = Surface{};
         ratio_ = Surface{};
         stats_ = Surface{};
         levels_ = 0;
         motion_ok_ = false;
+        motion_drawn_ = false;
+        flow_found_ = back_found_ = false;
+        history_ = false;
+        for (auto &c : crop_) c.Reset();
+        for (auto &c : crop_srv_) c.Reset();
+        crop_format_ = DXGI_FORMAT_UNKNOWN;
+        picture_ = Picture{};
         device_.Reset();
         width_ = height_ = 0;
+        frame_w_ = frame_h_ = 0;
     }
 
-    UINT width() const { return width_; }
+    // The frames' size, and the picture's place in them (all 0: the whole frame).
+    UINT width() const { return frame_w_; }
+    const Picture &picture() const { return picture_; }
     // The last motion draw's [brightness gain from a to b, share of cells that
     // matched nothing, the same of cells with detail, share with detail], for
     // the evaluator.
@@ -233,14 +306,32 @@ public:
     ID3D11Buffer *layer_counters() const { return lacc_.buf.Get(); }  // ACC_STRIDE uints per cell (component roots)
     UINT grid_w() const { return mid_w_; }
     UINT grid_h() const { return mid_h_; }
-    UINT height() const { return height_; }
+    UINT height() const { return frame_h_; }
+
+    // Keeps the motion found by the last draw for the next pair's search (hist_search), which must then be drawn
+    // with DrawOptions::follows: its frame a is this pair's frame b. After a draw that found no motion (blend),
+    // nothing is kept.
+    void keep_history(ID3D11DeviceContext *ctx) {
+        history_ = false;
+        if (!motion_drawn_) return;
+        for (int i = 0; i < levels_; ++i) ctx->CopyResource(level_[i].hist.tex.Get(), level_[i].bwd.tex.Get());
+        history_ = true;
+    }
+    void forget_history() { history_ = false; }
 
     // Draws the frame at o.t between a and b into target. a, b and target are
     // width x height; a and b are shader resources, target a render target.
     void draw(ID3D11DeviceContext *ctx, ID3D11ShaderResourceView *a, ID3D11ShaderResourceView *b,
               ID3D11RenderTargetView *target, const DrawOptions &o) {
-        if (o.method == Method::motion && motion_ok_) {
-            find_motion(ctx, a, b, o.t);
+        flow_found_ = back_found_ = false;
+        motion_drawn_ = o.method == Method::motion && motion_ok_ && (picture_.x1 == 0 || take_picture(ctx, a, b, target));
+        if (motion_drawn_) {
+            if (picture_.x1 != 0) {
+                a = crop_srv_[0].Get();
+                b = crop_srv_[1].Get();
+            }
+            find_motion(ctx, a, b, o.t, o.follows);
+            if (after_motion) after_motion(ctx, a, b);
             if (layer_enable) {
                 find_layers(ctx, a, b, o.t);
                 stage("layers");
@@ -250,6 +341,84 @@ public:
         } else {
             draw_blend(ctx, a, b, target, o);
         }
+    }
+
+    // The motion from a to b alone, without a frame drawn: the pyramids and
+    // the search one way (level 0's field, before HoldCS). For a caller whose
+    // frames in between are made by other means (DLSS Frame Generation) and
+    // who still wants the block motion. False when the frame is too small.
+    // back: the search the other way too (block_motion_back()).
+    bool find_flow(ID3D11DeviceContext *ctx, ID3D11ShaderResourceView *a, ID3D11ShaderResourceView *b,
+                   bool back = false) {
+        motion_drawn_ = false;
+        flow_found_ = back_found_ = false;
+        if (!motion_ok_) return false;
+        if (picture_.x1 != 0) {
+            if (!copy_picture(ctx, a, b)) return false;
+            a = crop_srv_[0].Get();
+            b = crop_srv_[1].Get();
+        }
+        ctx->CSSetConstantBuffers(0, 1, cb_.GetAddressOf());
+        ctx->CSSetSamplers(0, 1, linear_.GetAddressOf());
+        make_pyramids(ctx, a, b);
+        search(ctx, 0, false);
+        if (back) search(ctx, 1, false);
+        unbind(ctx);
+        flow_found_ = true;
+        back_found_ = back;
+        return true;
+    }
+
+    // block_motion_back() as a game's motion vectors, drawn into `target`
+    // (two floats a pixel, the frames' size): for each pixel of b, where it
+    // was in a less where it is, in pixels; zero outside the picture. False
+    // when there is no such motion.
+    bool draw_motion_back(ID3D11DeviceContext *ctx, ID3D11RenderTargetView *target) {
+        const BlockMotion m = block_motion_back();
+        if (!m.field || !vectors_ps_) return false;
+        const float cell = float(kBlock) * m.to_frame;
+        const VectorsParams params{float(picture_.x0),       float(picture_.y0),       float(width_), float(height_),
+                                   float(m.grid_w) * cell, float(m.grid_h) * cell, m.to_frame,    0.0f};
+        ctx->UpdateSubresource(vectors_cb_.Get(), 0, nullptr, &params, 0, 0);
+        begin_fullscreen(ctx, target);
+        ctx->PSSetShader(vectors_ps_.Get(), nullptr, 0);
+        ctx->PSSetConstantBuffers(0, 1, vectors_cb_.GetAddressOf());
+        ctx->PSSetSamplers(0, 1, linear_.GetAddressOf());
+        ctx->PSSetShaderResources(0, 1, &m.field);
+        ctx->Draw(3, 0);
+        ID3D11ShaderResourceView *none = nullptr;
+        ctx->PSSetShaderResources(0, 1, &none);
+        ID3D11RenderTargetView *no_target = nullptr;
+        ctx->OMSetRenderTargets(1, &no_target, nullptr);
+        return true;
+    }
+
+    // The block motion from b back to a, by b's cells: of the last
+    // find_flow(back) or motion draw (field null: none).
+    BlockMotion block_motion_back() const {
+        BlockMotion m;
+        if (!motion_drawn_ && !back_found_) return m;
+        m.field = level_[0].bwd.srv.Get();
+        m.grid_w = level_[0].gw;
+        m.grid_h = level_[0].gh;
+        m.picture = picture_;
+        return m;
+    }
+
+    // What the last motion draw or find_flow found (field null: nothing).
+    BlockMotion block_motion() const {
+        BlockMotion m;
+        if (!motion_drawn_ && !flow_found_) return m;
+        m.field = level_[0].fwd.srv.Get();
+        m.grid_w = level_[0].gw;
+        m.grid_h = level_[0].gh;
+        m.picture = picture_;
+        if (motion_drawn_) {
+            m.stats = stats_.srv.Get();
+            m.cut_fraction = cut_share();
+            m.cut_detailed = cut_detailed;
+        }
+        return m;
     }
 
     // Tuning, for the evaluator.
@@ -278,6 +447,32 @@ public:
     float guess_cost = 0.5f;       // search: what the search around no motion finds wins over what the search around
                                    // the coarser estimate found if it fits better by this (luma SAD; <0 = no 2nd search)
     float guess_ratio = 0.5f;      // ... and at most this share as badly
+    int hist_search = 0;           // search: 1 = also around what the block did over the last pair (keep_history)
+    float hist_cost = 0.5f;        // ... which wins over the other searches if it fits better by this (luma SAD)
+    float hist_ratio = 0.5f;       // ... and at most this share as badly
+    // The frame's edges (learnings 4.6): in a camera turn the strip along an edge that only one frame shows.
+    // The add-on's EdgeRules: off is edge_cost -1 and edge_explains 1.
+    float edge_cost = 0.01f;       // mid: a pixel whose sample in a or b is off the frame costs this instead of the
+                                   // comparison with the edge pixel, under a motion the frame has further in (< 0 = off)
+    float edge_tol = 0.25f;        // ... has: within this share of its length (+ 2 px) of the motion found there (0 = not asked)
+    float edge_fit = 0.02f;        // ... and it carries a onto b there this well (luma per pixel; 0 = not asked)
+    float edge_still = 0.004f;     // ... not for a pixel a and b show this alike where it is (a HUD at the edge; 0 = any)
+    float edge_explains = 0.0f;    // warp: 1 = where the other frame's sample is off the frame, one frame alone explains
+                                   // the pixel whatever its own motion there; 0 = only if that motion agrees, as elsewhere
+    int edge_search = 0;           // search: 1 = a block the coarser estimate takes off the frame keeps the estimate,
+                                   // unless it matched better than edge_fit
+    // A HUD over fast scenery (learnings 4.7): its cells take the scenery's motion, and nothing says it stands still.
+    // The add-on's StillHud: off is hud_detail 0.
+    float hud_detail = 0.04f;      // mid: a pixel with this much contrast in a and in b (luma), the same edge in both where
+                                   // it is, across the cell's motion and not where that would have taken it, is static
+                                   // detail (0 = off: not looked for, nothing held)
+    float hud_same = 0.25f;        // ... the same: as bright within this share of the contrast, facing the same way within twice it
+    float hud_across = 0.5f;       // ... across: its gradient along the motion is at least this share of it (stairs in a turn)
+    float hud_slack = 0.03f;       // ... not where the motion would have taken it: nor within 1 px + this share of the
+                                   // motion's length along it (pillars in a fast pan; < 0 = at that place only)
+    float hud_pixels = 6.0f;       // a cell with this many such pixels (of 64) stands still: its motion at the frame in
+                                   // between, and a's and b's blocks there
+    int hud_spread = 1;            // ... and so do the cells this far around it (0 or 1)
     int warp_taps = 5;             // pixels a candidate is compared on: 1 or 5
     int warp_ring = 3;             // cells whose motion a pixel tries: 2 (2x2) or 3 (3x3)
     // Motion layers (flow.hlsl "Motion layers"): a compact object whose motion the camera's does not explain,
@@ -337,6 +532,14 @@ public:
     float layer_bgnear = 0.3f;  // the layer's gate counts an option within this share of the background's speed past the layer of its motion, if more than layer_vdiff (a fast turn: the model is 10-15 px off; 0 = off)
     // Called after each stage of a motion draw (the evaluator times them).
     std::function<void(const char *)> on_stage;
+    // Called in a motion draw once the motion is found (block_motion() is this
+    // pair's) and before anything is drawn from the frames. a and b are what
+    // the passes work on - the frames, or with a Picture the picture's part
+    // of them - and may be changed for other pictures of the same size and
+    // format to draw the frame in between from (fg_hud.h: the frames without
+    // their HUD). It may change pipeline state as draw() does. Not set:
+    // nothing is different.
+    std::function<void(ID3D11DeviceContext *, ID3D11ShaderResourceView *&, ID3D11ShaderResourceView *&)> after_motion;
 
 private:
     // flow.hlsl's constant buffer.
@@ -390,12 +593,26 @@ private:
         FLOAT layer_still_dx;
         FLOAT layer_select_dom;
         FLOAT layer_merge_core;
-        FLOAT pad_end[3];
+        INT has_hist;
+        FLOAT hist_cost, hist_ratio;
+        FLOAT edge_cost;
+        FLOAT edge_tol, edge_fit;
+        INT edge_search;
+        FLOAT origin_x, origin_y;
+        FLOAT edge_still;
+        FLOAT edge_explains;
+        FLOAT hud_detail, hud_same, hud_across, hud_pixels;
+        INT hud_spread;
+        FLOAT hud_slack;
+        INT pad_[2];
     };
     static_assert(sizeof(Params) % 16 == 0, "constant buffers come in 16-byte registers");
     // blend.hlsl's.
     struct BlendParams {
         float weight, marker, marker_level, pad;
+    };
+    struct VectorsParams {  // vectors.hlsl
+        float origin_x, origin_y, picture_w, picture_h, field_w, field_h, to_frame, pad;
     };
 
     struct Surface {
@@ -409,6 +626,7 @@ private:
         Surface luma[2];      // frame a, frame b
         Surface fwd, bwd;     // a -> b and b -> a, median-filtered
         Surface raw;          // a field before its median
+        Surface hist;         // the last pair's bwd (keep_history)
     };
 
     static std::string hex(HRESULT hr) {
@@ -464,6 +682,61 @@ private:
         if (SUCCEEDED(hr)) hr = device_->CreateShaderResourceView(s.tex.Get(), nullptr, &s.srv);
         if (SUCCEEDED(hr)) hr = device_->CreateUnorderedAccessView(s.tex.Get(), nullptr, &s.uav);
         return hr;
+    }
+
+    // The picture's part of a and b, copied out for the passes to work on, and what is outside it drawn into
+    // the target as a has it. False if the copies cannot be made (the blend is drawn then).
+    bool take_picture(ID3D11DeviceContext *ctx, ID3D11ShaderResourceView *a, ID3D11ShaderResourceView *b,
+                      ID3D11RenderTargetView *target) {
+        if (!copy_picture(ctx, a, b)) return false;
+        ComPtr<ID3D11Resource> ra, rt;
+        a->GetResource(&ra);
+        target->GetResource(&rt);
+        // Around the picture: above, below, left, right.
+        const D3D11_BOX around[4] = {{0, 0, 0, frame_w_, picture_.y0, 1},
+                                     {0, picture_.y1, 0, frame_w_, frame_h_, 1},
+                                     {0, picture_.y0, 0, picture_.x0, picture_.y1, 1},
+                                     {picture_.x1, picture_.y0, 0, frame_w_, picture_.y1, 1}};
+        for (const D3D11_BOX &r : around)
+            if (r.left < r.right && r.top < r.bottom) ctx->CopySubresourceRegion(rt.Get(), 0, r.left, r.top, 0, ra.Get(), 0, &r);
+        return true;
+    }
+
+    // The copies alone.
+    bool copy_picture(ID3D11DeviceContext *ctx, ID3D11ShaderResourceView *a, ID3D11ShaderResourceView *b) {
+        ComPtr<ID3D11Resource> ra, rb;
+        a->GetResource(&ra);
+        b->GetResource(&rb);
+        ComPtr<ID3D11Texture2D> ta;
+        if (FAILED(ra.As(&ta))) return false;
+        D3D11_TEXTURE2D_DESC desc{};
+        ta->GetDesc(&desc);
+        if (desc.Width != frame_w_ || desc.Height != frame_h_ || desc.SampleDesc.Count != 1) return false;
+        if (!crop_[0] || crop_format_ != desc.Format) {
+            D3D11_TEXTURE2D_DESC cd{};
+            cd.Width = width_;
+            cd.Height = height_;
+            cd.MipLevels = 1;
+            cd.ArraySize = 1;
+            cd.Format = desc.Format;
+            cd.SampleDesc.Count = 1;
+            cd.Usage = D3D11_USAGE_DEFAULT;
+            cd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+            for (int i = 0; i < 2; ++i) {
+                crop_[i].Reset();
+                crop_srv_[i].Reset();
+                if (FAILED(device_->CreateTexture2D(&cd, nullptr, &crop_[i])) ||
+                    FAILED(device_->CreateShaderResourceView(crop_[i].Get(), nullptr, &crop_srv_[i]))) {
+                    crop_[0].Reset();
+                    return false;
+                }
+            }
+            crop_format_ = desc.Format;
+        }
+        const D3D11_BOX box{picture_.x0, picture_.y0, 0, picture_.x1, picture_.y1, 1};
+        ctx->CopySubresourceRegion(crop_[0].Get(), 0, 0, 0, 0, ra.Get(), 0, &box);
+        ctx->CopySubresourceRegion(crop_[1].Get(), 0, 0, 0, 0, rb.Get(), 0, &box);
+        return true;
     }
 
     void set_params(ID3D11DeviceContext *ctx, const Params &p) { ctx->UpdateSubresource(cb_.Get(), 0, nullptr, &p, 0, 0); }
@@ -638,10 +911,18 @@ private:
         if (on_stage) on_stage(name);
     }
 
-    void find_motion(ID3D11DeviceContext *ctx, ID3D11ShaderResourceView *a, ID3D11ShaderResourceView *b, float t) {
-        ctx->CSSetConstantBuffers(0, 1, cb_.GetAddressOf());
-        ctx->CSSetSamplers(0, 1, linear_.GetAddressOf());
+    void unbind(ID3D11DeviceContext *ctx) {
+        ID3D11UnorderedAccessView *no_uav[kOutputs] = {};
+        ctx->CSSetUnorderedAccessViews(0, kOutputs, no_uav, nullptr);
+        ID3D11ShaderResourceView *none[kInputs] = {};
+        ctx->CSSetShaderResources(0, kInputs, none);
+    }
 
+    // cut_fraction was set on frames with bars, whose cells always match: of the picture alone the same
+    // frames leave a larger share unmatched (a fight at 0.17 of a 21:9 frame is 0.23 of its 16:9 picture).
+    float cut_share() const { return cut_fraction * float(frame_w_) * float(frame_h_) / (float(width_) * float(height_)); }
+
+    void make_pyramids(ID3D11DeviceContext *ctx, ID3D11ShaderResourceView *a, ID3D11ShaderResourceView *b) {
         // Both pyramids.
         ID3D11ShaderResourceView *frames[2] = {a, b};
         for (int f = 0; f < 2; ++f) {
@@ -665,10 +946,12 @@ private:
             dispatch(ctx, stats_cs_.Get(), {top.luma[0].srv.Get(), top.luma[1].srv.Get()}, {stats_.uav.Get()}, 1, 1);
         }
         stage("pyramids");
+    }
 
-        // The motion both ways, coarse to fine: a's blocks found in b (fwd),
-        // and b's blocks found in a (bwd).
-        for (int dir = 0; dir < 2; ++dir) {
+    // The motion one way, coarse to fine: a's blocks found in b (dir 0, fwd),
+    // or b's blocks found in a (dir 1, bwd).
+    void search(ID3D11DeviceContext *ctx, int dir, bool follows) {
+        {
             for (int i = levels_ - 1; i >= 0; --i) {
                 Level &l = level_[i];
                 Surface &out = dir == 0 ? l.fwd : l.bwd;
@@ -682,6 +965,12 @@ private:
                 p.guess_cost = guess_cost;
                 p.guess_ratio = guess_ratio;
                 p.swap = dir;
+                const bool hist = hist_search && history_ && follows;
+                p.has_hist = hist ? 1 : 0;
+                p.hist_cost = hist_cost;
+                p.hist_ratio = hist_ratio;
+                p.edge_search = edge_search;
+                p.edge_fit = edge_fit;
                 ID3D11ShaderResourceView *pred = nullptr;
                 if (i + 1 < levels_) {
                     Level &coarse = level_[i + 1];
@@ -691,11 +980,23 @@ private:
                     pred = (dir == 0 ? coarse.fwd : coarse.bwd).srv.Get();
                 }
                 set_params(ctx, p);
-                dispatch(ctx, search_cs_.Get(), {l.luma[dir].srv.Get(), l.luma[1 - dir].srv.Get(), pred, stats_.srv.Get()},
+                dispatch(ctx, search_cs_.Get(),
+                         {l.luma[dir].srv.Get(), l.luma[1 - dir].srv.Get(), pred, stats_.srv.Get(),
+                          hist ? l.hist.srv.Get() : nullptr},
                          {l.raw.uav.Get()}, l.gw, l.gh);
                 dispatch(ctx, median_cs_.Get(), {l.raw.srv.Get()}, {out.uav.Get()}, groups(l.gw), groups(l.gh));
             }
             stage(dir == 0 ? "search a->b" : "search b->a");
+        }
+    }
+
+    void find_motion(ID3D11DeviceContext *ctx, ID3D11ShaderResourceView *a, ID3D11ShaderResourceView *b, float t,
+                     bool follows) {
+        ctx->CSSetConstantBuffers(0, 1, cb_.GetAddressOf());
+        ctx->CSSetSamplers(0, 1, linear_.GetAddressOf());
+        make_pyramids(ctx, a, b);
+        for (int dir = 0; dir < 2; ++dir) {
+            search(ctx, dir, follows);
             if (dir == 0) {
                 // With a's motion known, measure the brightness change on
                 // content that matches; the search back and the rest use it.
@@ -727,23 +1028,44 @@ private:
         p.inv_w = 1.0f / float(l0.w);
         p.inv_h = 1.0f / float(l0.h);
         p.bad_cost = bad_cost;
+        p.edge_cost = edge_cost;
+        p.edge_tol = edge_tol;
+        p.edge_fit = edge_fit;
+        p.edge_still = edge_still;
+        p.hud_detail = hud_detail;
+        p.hud_same = hud_same;
+        p.hud_across = hud_across;
+        p.hud_pixels = hud_pixels;
+        p.hud_spread = hud_spread;
+        p.hud_slack = hud_slack;
         set_params(ctx, p);
         dispatch(ctx, mid_cs_.Get(),
                  {l0.luma[0].srv.Get(), l0.luma[1].srv.Get(), l0.fwd.srv.Get(), l0.bwd.srv.Get(), stats_.srv.Get()},
-                 {mid_raw_.uav.Get(), mid_cost_.uav.Get()}, groups(mid_w_), groups(mid_h_));
+                 {mid_raw_.uav.Get(), mid_cost_.uav.Get(), mid_still_.uav.Get()}, groups(mid_w_), groups(mid_h_));
         dispatch(ctx, median_cs_.Get(), {mid_raw_.srv.Get()}, {mid_.uav.Get()}, groups(mid_w_), groups(mid_h_));
         // How much of it matched nothing (a cut).
         dispatch(ctx, cut_cs_.Get(), {mid_cost_.srv.Get()}, {stats_.uav.Get()}, 1, 1);
-        stage("motion at t");
+        // The cells that hold a HUD stand still (HoldCS): written beside the three fields, then copied over them.
+        const bool hold = hud_detail > 0.0f && l0.gw == mid_w_ && l0.gh == mid_h_;
+        if (hold)
+            dispatch(ctx, hold_cs_.Get(), {mid_.srv.Get(), l0.fwd.srv.Get(), l0.bwd.srv.Get(), mid_still_.srv.Get()},
+                     {mid_raw_.uav.Get(), l0.raw.uav.Get(), hold_.uav.Get()}, groups(mid_w_), groups(mid_h_));
 
         ID3D11UnorderedAccessView *no_uav[kOutputs] = {};
         ctx->CSSetUnorderedAccessViews(0, kOutputs, no_uav, nullptr);
         ID3D11ShaderResourceView *none[kInputs] = {};
         ctx->CSSetShaderResources(0, kInputs, none);
+        if (hold) {
+            ctx->CopyResource(mid_.tex.Get(), mid_raw_.tex.Get());
+            ctx->CopyResource(l0.fwd.tex.Get(), l0.raw.tex.Get());
+            ctx->CopyResource(l0.bwd.tex.Get(), hold_.tex.Get());
+        }
+        stage("motion at t");
     }
 
-    // Full-screen triangle state shared by the passes that draw into target.
-    void begin_fullscreen(ID3D11DeviceContext *ctx, ID3D11RenderTargetView *target) {
+    // Full-screen triangle state shared by the passes that draw into target: the whole of it, or the
+    // picture's part.
+    void begin_fullscreen(ID3D11DeviceContext *ctx, ID3D11RenderTargetView *target, bool picture_only = false) {
         ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         ctx->IASetInputLayout(nullptr);
         ctx->VSSetShader(vs_.Get(), nullptr, 0);
@@ -751,7 +1073,8 @@ private:
         ctx->DSSetShader(nullptr, nullptr, 0);
         ctx->GSSetShader(nullptr, nullptr, 0);
         ctx->RSSetState(nullptr);  // the default: solid fill, back faces culled (ours faces front), no scissor
-        const D3D11_VIEWPORT vp{0, 0, float(width_), float(height_), 0, 1};
+        const D3D11_VIEWPORT vp = picture_only ? D3D11_VIEWPORT{float(picture_.x0), float(picture_.y0), float(width_), float(height_), 0, 1}
+                                               : D3D11_VIEWPORT{0, 0, float(frame_w_), float(frame_h_), 0, 1};
         ctx->RSSetViewports(1, &vp);
         ctx->OMSetRenderTargets(1, &target, nullptr);
         ctx->OMSetBlendState(nullptr, nullptr, 0xffffffff);
@@ -774,7 +1097,7 @@ private:
         p.marker_level = o.marker_level;
         p.occlusion_cost = occlusion_cost;
         p.flow_weight = flow_weight;
-        p.cut_fraction = cut_fraction;
+        p.cut_fraction = cut_share();
         p.cut_detailed = cut_detailed;
         p.layer_cost = layer_cost;
         p.persist_max = persist_max;
@@ -789,9 +1112,12 @@ private:
         p.soft_wide = soft_wide;
         p.warp_taps = warp_taps;
         p.warp_ring = warp_ring;
+        p.edge_explains = edge_explains;
+        p.origin_x = float(picture_.x0);
+        p.origin_y = float(picture_.y0);
         set_layer_params(p);
         set_params(ctx, p);
-        begin_fullscreen(ctx, target);
+        begin_fullscreen(ctx, target, true);
         ctx->PSSetShader(warp_ps_.Get(), nullptr, 0);
         ctx->PSSetConstantBuffers(0, 1, cb_.GetAddressOf());
         ctx->PSSetSamplers(0, 1, linear_.GetAddressOf());
@@ -820,11 +1146,16 @@ private:
     }
 
     ComPtr<ID3D11Device> device_;
-    UINT width_ = 0, height_ = 0;
+    UINT frame_w_ = 0, frame_h_ = 0;  // the frames given to draw()
+    Picture picture_;                 // the picture's place in them (all 0: the whole frame)
+    UINT width_ = 0, height_ = 0;     // what the motion passes work on: the picture
+    ComPtr<ID3D11Texture2D> crop_[2];  // the picture's part of a and b (take_picture)
+    ComPtr<ID3D11ShaderResourceView> crop_srv_[2];
+    DXGI_FORMAT crop_format_ = DXGI_FORMAT_UNKNOWN;
     ComPtr<ID3D11VertexShader> vs_;
     ComPtr<ID3D11PixelShader> blend_ps_, warp_ps_;
     ComPtr<ID3D11ComputeShader> luma0_cs_, lumadown_cs_, search_cs_, median_cs_, mid_cs_, stats_cs_, cut_cs_, ratio_cs_,
-        mgain_cs_;
+        mgain_cs_, hold_cs_;
     ComPtr<ID3D11ComputeShader> ldom_cs_, lmargin_cs_, llink_cs_, larea_cs_, lselect_cs_, lcell_cs_, lspread_cs_, linit_cs_,
         lgrow_cs_, lfinal_cs_, ldone_cs_, lbg_cs_, lclass_cs_, lrefine_cs_, lpick_cs_;
     Surface lvcost_;         // L_REFINE: the cost of each offset of the layer's motion
@@ -837,15 +1168,23 @@ private:
     RawBuffer lacc_;         // per component: area and box; then the vote counters
     RawBuffer largs_;        // DispatchIndirect arguments: L_DOM's (cell grid, one group)
     RawBuffer largs2_;       // ... L_SELECT's (the layer's box) - a dispatch may not write the buffer it is started from
+    ComPtr<ID3D11PixelShader> vectors_ps_;
+    ComPtr<ID3D11Buffer> vectors_cb_;
     ComPtr<ID3D11Buffer> cb_, blend_cb_;
     ComPtr<ID3D11SamplerState> linear_;
     Level level_[kMaxLevels];
     int levels_ = 0;
     Surface mid_, mid_raw_;
     Surface mid_cost_;  // per cell of the frame in between: how well its motion matched
+    Surface mid_still_;  // ... how many of its pixels hold detail that stands still while it moves (StaticDetail)
+    Surface hold_;       // HoldCS's third output (b's blocks), before it is copied over them
     Surface ratio_;     // per cell of a: brightness of where it went in b over its own (log2)
     Surface stats_;     // 4x1: brightness gain from a to b, shares of cells that matched nothing (CutCS)
     bool motion_ok_ = false;
+    bool motion_drawn_ = false;  // the last draw found motion (the levels' fields are its)
+    bool back_found_ = false;    // ... with the search back (level 0's bwd)
+    bool flow_found_ = false;    // find_flow ran since (level 0's fwd is its; nothing else is)
+    bool history_ = false;  // the levels' hist fields hold the last pair's motion
     UINT mid_w_ = 0, mid_h_ = 0;  // the cells of the motion at the frame in between
 };
 

@@ -9,9 +9,10 @@
 #include <format>
 #include <thread>
 
+#include "app_version.h"
 #include "log.h"
 
-namespace glasir {
+namespace app {
 namespace {
 
 constexpr int kDownload = 100;
@@ -88,12 +89,14 @@ HRESULT CALLBACK progress_events(HWND hwnd, UINT note, WPARAM wparam, LPARAM, LO
 }  // namespace
 
 std::optional<std::vector<Component>> ask_setup(const SetupChoice &choice) {
-    const std::wstring notices = L"<a href=\"" + choice.notices_file + L"\">THIRD-PARTY-NOTICES.md</a>";
+    // The words are the launcher's: these are its "downloaded parts", and a
+    // link is named by what it leads to, not by a file's name.
+    const std::wstring notices = L"<a href=\"" + choice.notices_file + L"\">the list of them</a>";
     const std::wstring content =
-        L"Glasir runs on programs made by others. They are downloaded from where their authors publish them, in "
-        L"the versions this Glasir was tested with, and each keeps its own licence (" + notices + L"):\n\n"
-        L"\x2022 mpv, the video player: github.com/zhongfly/mpv-winbuild (about 35 MB)\n"
-        L"\x2022 ReShade with add-on support, for frame generation: reshade.me (about 5 MB)";
+        APP_NAME_W L" runs on programs made by others. They are downloaded from where their authors publish them, in "
+        L"the versions this " APP_NAME_W L" was tested with, and each keeps its own licence (see " + notices + L"):\n\n"
+        L"mpv, the video player: github.com/zhongfly/mpv-winbuild (about 35 MB)\n"
+        L"ReShade with add-on support, for frame generation: reshade.me (about 5 MB)";
     const std::wstring footer =
         L"DLSS 5 is DLSS5-Feeder, RenoDX-DLSS5 and NVIDIA's DLSS neural rendering (from RHI's mirror, "
         L"github.com/RankFTW/rhi-repo) and NVIDIA DLSS (github.com/NVIDIA/DLSS).";
@@ -103,9 +106,9 @@ std::optional<std::vector<Component>> ask_setup(const SetupChoice &choice) {
     c.cbSize = sizeof(c);
     c.dwFlags = TDF_ENABLE_HYPERLINKS | TDF_ALLOW_DIALOG_CANCELLATION | TDF_SIZE_TO_CONTENT |
                 (choice.dlss5_checked ? TDF_VERIFICATION_FLAG_CHECKED : 0);
-    c.pszWindowTitle = L"Glasir setup";
+    c.pszWindowTitle = APP_NAME_W L" setup";
     c.pszMainIcon = TD_INFORMATION_ICON;
-    c.pszMainInstruction = choice.first_run ? L"Glasir needs to download a few programs" : L"Download Glasir's components";
+    c.pszMainInstruction = choice.first_run ? APP_NAME_W L" needs to download a few programs" : L"Download " APP_NAME_W L"'s parts";
     c.pszContent = content.c_str();
     c.pButtons = buttons;
     c.cButtons = 1;
@@ -160,7 +163,7 @@ bool run_setup(const std::wstring &engine_dir, const std::vector<Component> &whi
     for (Component c : which) names += (names.empty() ? L"" : L", ") + std::wstring(component_name(c));
     log(L"setup: downloading {}", names);
     const bool ok = run_with_progress(
-        L"Glasir setup",
+        APP_NAME_W L" setup",
         [&](SetupProgress &progress, const std::atomic<bool> &cancel, std::wstring &e) {
             return install_components(engine_dir, which, versions, progress, cancel, e);
         },
@@ -172,4 +175,35 @@ bool run_setup(const std::wstring &engine_dir, const std::vector<Component> &whi
     return ok;
 }
 
-}  // namespace glasir
+bool ask_video_licence() {
+    const std::wstring content =
+        L"NVIDIA Video Frame Generation is NVIDIA's software, not a part of " APP_NAME_W L". It is downloaded from "
+        L"NVIDIA (pypi.nvidia.com, about 440 MB) and stays under NVIDIA's licences:\n\n"
+        L"\x2022 <a href=\"https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-software-license-agreement/\">"
+        L"NVIDIA Software License Agreement</a>\n"
+        L"\x2022 <a href=\"https://www.nvidia.com/en-us/agreements/enterprise-software/product-specific-terms-for-ai-products/\">"
+        L"Product-Specific Terms for NVIDIA AI Products</a>\n"
+        L"\x2022 <a href=\"https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-license/\">"
+        L"NVIDIA Open Model License</a>\n\n"
+        L"It needs an NVIDIA RTX 40 or 50 series GPU. By downloading it you accept these licences.";
+    const wchar_t *footer = L"One of their terms: results of testing NVIDIA's software (its speed, its quality, "
+                            L"comparisons) may not be published without NVIDIA's permission.";
+    const TASKDIALOG_BUTTON buttons[] = {{kDownload, L"Accept and download"}};
+    TASKDIALOGCONFIG c{};
+    c.cbSize = sizeof(c);
+    c.dwFlags = TDF_ENABLE_HYPERLINKS | TDF_ALLOW_DIALOG_CANCELLATION | TDF_SIZE_TO_CONTENT;
+    c.pszWindowTitle = APP_NAME_W L" setup";
+    c.pszMainIcon = TD_INFORMATION_ICON;
+    c.pszMainInstruction = L"Download NVIDIA Video Frame Generation";
+    c.pszContent = content.c_str();
+    c.pszFooter = footer;
+    c.pButtons = buttons;
+    c.cButtons = 1;
+    c.nDefaultButton = IDCANCEL;
+    c.dwCommonButtons = TDCBF_CANCEL_BUTTON;
+    c.pfCallback = links;
+    int button = 0;
+    return SUCCEEDED(TaskDialogIndirect(&c, &button, nullptr, nullptr)) && button == kDownload;
+}
+
+}  // namespace app

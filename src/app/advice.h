@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // What this PC will really do with the settings, what holds it back, and
 // what would suit it: from the screen, the GPUs, the capture card's modes
-// and glasir.ini. No UI and nothing read from the PC here: advise() only
+// and the settings file. No UI and nothing read from the PC here: advise() only
 // works on what it is given, so it can be tested and called from anywhere
 // (the launcher, the in-game menu, --system, bug reports).
 //
@@ -13,7 +13,7 @@
 //       i.text;                          // one or two plain sentences
 //       i.suggest;                       // not empty: offer "use recommended", then
 //                                        // save_settings(path, i.suggest)
-//       i.applied;                       // glasir.ini already has i.suggest: show it as done
+//       i.applied;                       // the settings file already has i.suggest: show it as done
 // An item's id never changes between versions (a UI may hide, group or
 // replace the text of items it knows by id); the text may.
 #pragma once
@@ -27,12 +27,12 @@
 #include "hdr.h"
 #include "settings.h"
 
-namespace glasir {
+namespace app {
 
 struct AdviceInput {
     Settings settings;
 
-    // The screen Glasir plays on (choose_display); found = false: unknown.
+    // The screen the app plays on (choose_display); found = false: unknown.
     DisplayInfo display;
     bool monitor_matched = true;  // display.monitor named a screen that is there
 
@@ -45,9 +45,19 @@ struct AdviceInput {
     std::wstring card;
     std::vector<VideoMode> modes;
 
+    // NVIDIA's program settings for the app's mpv.exe, when a profile of the
+    // driver names it (vrr.h, NvidiaAppVrr): the lesser of its two G-SYNC
+    // values - 0 off, 1 full screen only, 2 windowed too. -1: no profile
+    // (the global setting, in display, applies), or not read.
+    int mpv_profile_vrr = -1;
+    std::wstring mpv_profile;  // the profile's name
+
     // What is downloaded (components.h).
     bool reshade_installed = true;  // without it: no frame generation, no DLSS 5
     bool dlss5_installed = true;
+    bool dlssfg_installed = true;  // nvngx_dlssg.dll, for framegen.backend = dlss
+    bool video_installed = true;   // engine\\nvidia-vfg, for framegen.backend = video
+    bool anr_installed = true;     // engine\\anr, for framegen.backend = anr
 };
 
 enum class AdviceSeverity {
@@ -60,8 +70,8 @@ enum class AdviceKind {
     Limit,           // something the hardware or a setting holds back, with the reason
     Recommendation,  // a setting that suits this PC, with a one-line why
     // What to set on the console for these choices. The console only knows
-    // what the capture card's HDMI input says it takes, not what Glasir will
-    // do with the picture, so Glasir says it in words. Nothing of it can be
+    // what the capture card's HDMI input says it takes, not what the app will
+    // do with the picture, so the app says it in words. Nothing of it can be
     // set from here; the ids start with "console-".
     Console,
 };
@@ -71,7 +81,7 @@ struct AdviceItem {
     AdviceKind kind = AdviceKind::Limit;
     AdviceSeverity severity = AdviceSeverity::Info;
     std::wstring text;  // plain English, one or two sentences, with a full stop
-    // The glasir.ini values that follow the advice ("use recommended"); empty
+    // The settings file's values that follow the advice ("use recommended"); empty
     // when there is nothing to set (a limit of the hardware, or a switch in
     // Windows or the GPU's control panel).
     std::vector<SettingValue> suggest;
@@ -100,7 +110,7 @@ struct ShownRate {
     int better_hz = 0;
 };
 
-// What video.mode comes to with a card's modes, as Glasir.exe settles it when
+// What video.mode comes to with a card's modes, as the exe settles it when
 // it plays (main.cpp open_source). sdr and hdr are as said. auto captures in
 // the card's 10-bit mode for the size and rate asked, if it has one, and
 // starts as what the signal was last time (video.auto_found); without such a
@@ -114,7 +124,7 @@ VideoKind video_kind(const Settings &s, const std::vector<VideoMode> &modes, UIN
 struct Outcome {
     // SDR or HDR, with video.mode = auto settled for this card.
     VideoKind video;
-    // The capture mode Glasir will open, if the card has one for the settings.
+    // The capture mode the app will open, if the card has one for the settings.
     bool capture_known = false;
     VideoMode capture;
     bool media_foundation = false;  // false: mpv's DirectShow input (no dedup, no frame generation)
@@ -138,7 +148,7 @@ struct Outcome {
     HdrPlan hdr_plan;
 
     // Variable refresh as the add-ons are told: "on", "off" or "unknown"
-    // (vrr_for_addons: glasir.ini's display.vrr, else as found).
+    // (vrr_for_addons: the settings file's display.vrr, else as found).
     std::wstring vrr = L"unknown";
 
     bool dlss5 = false;        // DLSS 5 starts on
@@ -163,4 +173,4 @@ std::wstring advice_text(const Advice &advice);
 // "section.key=value", as --set takes it.
 std::wstring setting_text(const SettingValue &v);
 
-}  // namespace glasir
+}  // namespace app

@@ -12,7 +12,7 @@
 
 using Microsoft::WRL::ComPtr;
 
-namespace glasir {
+namespace app {
 
 std::vector<GpuInfo> list_gpus() {
     std::vector<GpuInfo> gpus;
@@ -78,6 +78,12 @@ bool dlss5_gpu(const GpuInfo &gpu) {
     return std::regex_search(gpu.name, nr);
 }
 
+bool dlss_fg_gpu(const GpuInfo &gpu) {
+    if (gpu.vendor != kVendorNvidia) return false;
+    static const std::wregex fg(L"RTX\\s*[45]0[5-9]0|\\bAda\\b|Blackwell", std::regex::icase);
+    return std::regex_search(gpu.name, fg);
+}
+
 const wchar_t *vsr_kind(const GpuInfo &gpu) {
     if (gpu.vendor == kVendorNvidia && gpu.name.find(L"RTX") != std::wstring::npos) return L"nvidia";
     if (gpu.vendor == kVendorIntel) return L"intel";
@@ -128,4 +134,4 @@ std::wstring gpu_text(const GpuInfo &gpu) {
     return t;
 }
 
-}  // namespace glasir
+}  // namespace app

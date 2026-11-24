@@ -7,7 +7,7 @@
 #include <iterator>
 #include <optional>
 
-namespace glasir {
+namespace app {
 namespace {
 
 bool blank(char c) { return c == ' ' || c == '\t'; }
@@ -131,4 +131,4 @@ bool ini_save_values(const std::wstring &path, const std::vector<IniValue> &valu
     return true;
 }
 
-}  // namespace glasir
+}  // namespace app

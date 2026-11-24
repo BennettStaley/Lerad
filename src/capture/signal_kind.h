@@ -39,7 +39,7 @@
 
 #include "pixel_format.h"
 
-namespace glasir {
+namespace app {
 
 enum class Signal { Unknown, Sdr, Hdr };
 
@@ -170,4 +170,4 @@ private:
     std::array<UINT32, 3> counts_{};  // by Signal
 };
 
-}  // namespace glasir
+}  // namespace app

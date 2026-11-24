@@ -2,10 +2,14 @@
 // Checks picking the card's mode, settings parsing, and mpv's command line.
 #include <windows.h>
 #include <shellapi.h>
+#include <wincodec.h>
+#include <wrl/client.h>
 
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <format>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -14,16 +18,16 @@
 #include "components.h"
 #include "devices.h"
 #include "files.h"
-#include "glasir_version.h"
+#include "frame_preview.h"
+#include "app_version.h"
 #include "gpu.h"
 #include "json.h"
 #include "log.h"
 #include "mpv_launch.h"
 #include "reshade_config.h"
 #include "settings.h"
-#include "update.h"
 
-using namespace glasir;
+using namespace app;
 
 namespace {
 
@@ -57,6 +61,59 @@ bool has(const std::vector<std::wstring> &args, const std::wstring &arg) {
         if (a == arg) return true;
     return false;
 }
+
+// A PNG as a frame generation capture writes it: 16 bits a channel (HDR10
+// PQ, R G B A) or 8 (B G R A), every pixel the same but the right half black.
+bool write_png(const std::wstring &path, UINT w, UINT h, bool deep, const UINT16 left[3]) {
+    using Microsoft::WRL::ComPtr;
+    const UINT bytes = deep ? 8 : 4;
+    std::vector<BYTE> pixels(size_t(w) * h * bytes);
+    for (UINT y = 0; y < h; ++y)
+        for (UINT x = 0; x < w; ++x) {
+            BYTE *px = pixels.data() + (size_t(y) * w + x) * bytes;
+            if (deep) {
+                const UINT16 c[4] = {x < w / 2 ? left[0] : UINT16(0), x < w / 2 ? left[1] : UINT16(0),
+                                     x < w / 2 ? left[2] : UINT16(0), 0xFFFF};
+                memcpy(px, c, 8);
+            } else {
+                for (int k = 0; k < 3; ++k) px[k] = x < w / 2 ? BYTE(left[k]) : BYTE(0);
+                px[3] = 255;
+            }
+        }
+    ComPtr<IWICImagingFactory> wic;
+    ComPtr<IWICStream> stream;
+    ComPtr<IWICBitmapEncoder> encoder;
+    ComPtr<IWICBitmapFrameEncode> frame;
+    WICPixelFormatGUID format = deep ? GUID_WICPixelFormat64bppRGBA : GUID_WICPixelFormat32bppBGRA;
+    return SUCCEEDED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wic))) &&
+           SUCCEEDED(wic->CreateStream(&stream)) && SUCCEEDED(stream->InitializeFromFilename(path.c_str(), GENERIC_WRITE)) &&
+           SUCCEEDED(wic->CreateEncoder(GUID_ContainerFormatPng, nullptr, &encoder)) &&
+           SUCCEEDED(encoder->Initialize(stream.Get(), WICBitmapEncoderNoCache)) &&
+           SUCCEEDED(encoder->CreateNewFrame(&frame, nullptr)) && SUCCEEDED(frame->Initialize(nullptr)) &&
+           SUCCEEDED(frame->SetSize(w, h)) && SUCCEEDED(frame->SetPixelFormat(&format)) &&
+           SUCCEEDED(frame->WritePixels(h, w * bytes, UINT(pixels.size()), pixels.data())) &&
+           SUCCEEDED(frame->Commit()) && SUCCEEDED(encoder->Commit());
+}
+
+// The size of an image file and its pixel at (x, y), as B G R.
+bool read_pixel(const std::wstring &path, UINT x, UINT y, UINT &w, UINT &h, BYTE bgr[3]) {
+    using Microsoft::WRL::ComPtr;
+    ComPtr<IWICImagingFactory> wic;
+    ComPtr<IWICBitmapDecoder> decoder;
+    ComPtr<IWICBitmapFrameDecode> source;
+    ComPtr<IWICFormatConverter> converter;
+    const WICRect one{INT(x), INT(y), 1, 1};
+    return SUCCEEDED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wic))) &&
+           SUCCEEDED(wic->CreateDecoderFromFilename(path.c_str(), nullptr, GENERIC_READ, WICDecodeMetadataCacheOnDemand,
+                                                    &decoder)) &&
+           SUCCEEDED(decoder->GetFrame(0, &source)) && SUCCEEDED(source->GetSize(&w, &h)) &&
+           SUCCEEDED(wic->CreateFormatConverter(&converter)) &&
+           SUCCEEDED(converter->Initialize(source.Get(), GUID_WICPixelFormat24bppBGR, WICBitmapDitherTypeNone, nullptr, 0,
+                                           WICBitmapPaletteTypeCustom)) &&
+           SUCCEEDED(converter->CopyPixels(&one, 3, 3, bgr));
+}
+
+bool near_to(BYTE value, int wanted, int by) { return value >= wanted - by && value <= wanted + by; }
 
 }  // namespace
 
@@ -148,7 +205,7 @@ int main() {
 
         wchar_t dir[MAX_PATH];
         GetTempPathW(MAX_PATH, dir);
-        const std::wstring path = std::wstring(dir) + L"glasir_test_settings.ini";
+        const std::wstring path = std::wstring(dir) + L"app_test_settings.ini";
         DeleteFileW(path.c_str());
         Settings fresh;
         expect(load_settings(path, fresh, error), "missing settings file: defaults");
@@ -172,7 +229,7 @@ int main() {
     }
     {
         // Arguments survive quoting exactly (paths with spaces, quotes, trailing backslashes).
-        const std::vector<std::wstring> tricky = {L"--config-dir=C:\\Program Files\\Glasir\\engine\\",
+        const std::vector<std::wstring> tricky = {L"--config-dir=C:\\Program Files\\" APP_NAME_W L"\\engine\\",
                                                   L"plain", L"say \"hi\"", L"C:\\a b\\\\", L"", L"--geometry=100%x100%"};
         const std::wstring line = join_command_line(L"C:\\My Apps\\mpv.exe", tricky);
         int argc = 0;
@@ -193,12 +250,14 @@ int main() {
         plan.fps = 60;
         auto args = mpv_arguments(plan, s);
         expect(has(args, L"--demuxer-rawvideo-mp-format=nv12") && has(args, L"--demuxer-rawvideo-fps=60") &&
-                   has(args, L"--vf=format=colormatrix=bt.709:colorlevels=limited:primaries=bt.709:chroma-location=uhd"),
-               "SDR NV12: raw format, rate and BT.709 tags");
+                   has(args, L"--vf=@app-colour:format=colormatrix=bt.709:colorlevels=limited:primaries=bt.709:"
+                             L"chroma-location=uhd") &&
+                   has(args, L"--target-colorspace-hint=no"),
+               "SDR NV12: raw format, rate and BT.709 tags (a labelled filter: replaced while playing)");
         plan.layout.format = PixelFormat::YUY2;
         args = mpv_arguments(plan, s);
         expect(has(args, L"--demuxer-rawvideo-mp-format=yuyv422") &&
-                   has(args, L"--vf=format=colormatrix=bt.709:colorlevels=limited:primaries=bt.709:"
+                   has(args, L"--vf=@app-colour:format=colormatrix=bt.709:colorlevels=limited:primaries=bt.709:"
                              L"chroma-location=mpeg2/4/h264"),
                "SDR YUY2: yuyv422, chroma sited left");
         s.hdr = true;
@@ -209,6 +268,55 @@ int main() {
         expect(has(args, L"--demuxer-rawvideo-mp-format=p010") && has(args, L"--demuxer-rawvideo-fps=59.94") &&
                    has(args, L"--d3d11-output-csp=pq") && has(args, L"--target-colorspace-hint=yes"),
                "HDR P010 on a screen with HDR on: PQ output (test_hdr has the rest)");
+        // The picture switched while playing: the tags (the same label, so
+        // the filter is replaced), the script's filters, mpv's output, what
+        // the frames are shown as for whoever asks. test_hdr has what is
+        // done with HDR on each kind of screen.
+        const std::string to_sdr = picture_commands(plan, s, false);
+        const std::string to_hdr = picture_commands(plan, s, true);
+        auto in = [](const std::string &text, const char *part) { return text.find(part) != std::string::npos; };
+        auto before = [](const std::string &text, const char *first, const char *second) {
+            const size_t a = text.find(first), b = text.find(second);
+            return a != std::string::npos && b != std::string::npos && a < b;
+        };
+        expect(in(to_sdr, "[\"vf\",\"add\",\"@app-colour:format=colormatrix=bt.709:colorlevels=limited:"
+                          "primaries=bt.709:chroma-location=uhd\"]") &&
+                   in(to_sdr, "[\"script-message\",\"app-signal\",\"sdr\"]") &&
+                   in(to_sdr, "[\"set\",\"target-colorspace-hint\",\"no\"]") &&
+                   in(to_sdr, "[\"set\",\"target-peak\",\"auto\"]") &&
+                   in(to_sdr, "[\"set\",\"user-data/app/signal\",\"sdr\"]"),
+               "live switch to SDR: BT.709 tags, an SDR output, the peak from fitting taken back");
+        expect(in(to_hdr, "[\"vf\",\"add\",\"@app-colour:format=colormatrix=bt.2020-ncl:") &&
+                   in(to_hdr, "gamma=pq:max-luma=1000:max_cll=1000\"]") &&
+                   in(to_hdr, "[\"script-message\",\"app-signal\",\"hdr\"]") &&
+                   in(to_hdr, "[\"set\",\"target-colorspace-hint-mode\",\"source\"]") &&
+                   in(to_hdr, "[\"set\",\"target-colorspace-hint\",\"yes\"]") &&
+                   in(to_hdr, "[\"set\",\"user-data/app/signal\",\"hdr\"]"),
+               "live switch to HDR: PQ tags, HDR10 to a screen with HDR on, as the console sends it");
+        expect(before(to_hdr, "\"vf\"", "app-signal") && before(to_hdr, "app-signal", "target-colorspace-hint") &&
+                   before(to_sdr, "\"vf\"", "app-signal") && before(to_sdr, "app-signal", "target-colorspace-hint"),
+               "live switch: the tags first, then the script's filters, then the output");
+        expect(!in(to_hdr, "d3d11-output") && !in(to_sdr, "d3d11-output"),
+               "live switch: never d3d11-output-csp or -format (mpv would build its output again)");
+        {
+            MpvPlan off = plan;  // HDR off in Windows: tone mapped, the swap chain stays SDR
+            off.display.hdr_on = false;
+            const std::string mapped = picture_commands(off, s, true);
+            expect(in(mapped, "gamma=pq") && in(mapped, "[\"set\",\"target-colorspace-hint\",\"no\"]") &&
+                       in(mapped, "[\"set\",\"user-data/app/signal\",\"hdr\"]"),
+                   "live switch to HDR with HDR off in Windows: PQ tags, tone mapped into the SDR swap chain");
+        }
+        expect(picture_mode("auto") == PictureMode::Auto && picture_mode("sdr") == PictureMode::Sdr &&
+                   picture_mode("hdr") == PictureMode::Hdr && !picture_mode("HDR") && !picture_mode(""),
+               "the menu's words for the picture: auto, sdr, hdr and nothing else");
+        expect(std::wstring(picture_mode_name(PictureMode::Auto)) == L"auto" &&
+                   std::wstring(picture_mode_name(PictureMode::Sdr)) == L"sdr" &&
+                   std::wstring(picture_mode_name(PictureMode::Hdr)) == L"hdr",
+               "and back to the settings file's words");
+        expect(shown_as_hdr(PictureMode::Auto, true) && !shown_as_hdr(PictureMode::Auto, false) &&
+                   !shown_as_hdr(PictureMode::Sdr, true) && !shown_as_hdr(PictureMode::Sdr, false) &&
+                   shown_as_hdr(PictureMode::Hdr, false) && shown_as_hdr(PictureMode::Hdr, true),
+               "Automatic follows the signal; SDR and HDR are as said, whatever the signal");
         s.hdr = false;
         plan.raw = false;
         plan.dshow_device = L"USB Video";
@@ -225,7 +333,7 @@ int main() {
         args = mpv_arguments(plan, s);
         expect(has(args, L"--demuxer-lavf-o-append=video_size=1920x1080") &&
                    has(args, L"--demuxer-lavf-o-append=framerate=60") && has(args, L"--container-fps-override=60"),
-               "DirectShow without a known mode: glasir.ini's size and rate");
+               "DirectShow without a known mode: " APP_INI "'s size and rate");
         s.width = s.height = 0;
         s.fps = 0;
         args = mpv_arguments(plan, s);
@@ -237,7 +345,7 @@ int main() {
         // ReShade.ini, ReShadePreset.ini, dlss5-feed.cfg in a scratch engine folder.
         wchar_t tmp[MAX_PATH];
         GetTempPathW(MAX_PATH, tmp);
-        const std::wstring engine = std::wstring(tmp) + L"glasir_test_engine";
+        const std::wstring engine = std::wstring(tmp) + L"app_test_engine";
         CreateDirectoryW(engine.c_str(), nullptr);
         CreateDirectoryW((engine + L"\\reshade-shaders").c_str(), nullptr);
         CreateDirectoryW((engine + L"\\reshade-shaders\\Shaders").c_str(), nullptr);
@@ -280,9 +388,42 @@ int main() {
         expect(ini.find("PreprocessorDefinitions=DLSS5_MV_PROVIDER=5\r\n") != std::string::npos,
                "motion vectors: the Feeder's own");
         expect(ini.find("TutorialProgress=1") != std::string::npos, "an existing ReShade value is not overwritten");
-        expect(ini.find("NeuralUplift=1") != std::string::npos && ini.find("[GLASIR_FRAMEGEN]") != std::string::npos,
+        expect(ini.find("NeuralUplift=1") != std::string::npos && ini.find("[" APP_ENV_PREFIX "FRAMEGEN]") != std::string::npos,
                "DLSS 5 and frame generation keys written");
         expect(ini.find("NRScreenshotSource=2") != std::string::npos, "F5 screenshots: model buffers, not Auto");
+        // Frame generation's keys: the generator by its own name, the areas without commas, the HUD switch.
+        expect(ini.find("\r\nBackend=own\r\n") != std::string::npos && ini.find("\r\nHud=0\r\n") != std::string::npos &&
+                   ini.find("\r\nKeep=\r\n") != std::string::npos,
+               "frame generation: the app's own generator is \"own\", no areas, the HUD is not looked for");
+        {
+            Settings f = s;
+            std::wstring error;
+            expect(apply_override(f, L"framegen.backend=dlss", error) && apply_override(f, L"framegen.hud=1", error) &&
+                       apply_override(f, L"framegen.keep=r:2,80,20,15,hud;e:85,5,12,20", error),
+                   "frame generation: dlss, the HUD switch and an area that looks for a HUD are settings");
+            write_reshade_config(engine, f, true, true);
+            const std::string changed = read(L"\\ReShade.ini");
+            expect(changed.find("\r\nBackend=dlss\r\n") != std::string::npos &&
+                       changed.find("\r\nHud=1\r\n") != std::string::npos &&
+                       changed.find("\r\nKeep=r:2/80/20/15/hud|e:85/5/12/20\r\n") != std::string::npos,
+                   "frame generation: written for the add-on, the areas in ReShade.ini's form");
+            expect(!apply_override(f, L"framegen.hud=maybe", error) && !apply_override(f, L"framegen.backend=fsr", error),
+                   "frame generation: other values are refused");
+            expect(apply_override(f, L"framegen.backend=video", error) && f.framegen_video && !f.framegen_dlss,
+                   "frame generation: video is NVIDIA Video Frame Generation, in place of dlss");
+            write_reshade_config(engine, f, true, true);
+            expect(read(L"\\ReShade.ini").find("\r\nBackend=video\r\n") != std::string::npos,
+                   "frame generation: and written so for the add-on");
+            expect(apply_override(f, L"framegen.backend=anr", error) && f.framegen_anr && !f.framegen_video &&
+                       !f.framegen_dlss,
+                   "frame generation: anr is Apex Neural Rendering's, in place of the others");
+            write_reshade_config(engine, f, true, true);
+            expect(read(L"\\ReShade.ini").find("\r\nBackend=anr\r\n") != std::string::npos,
+                   "frame generation: and written so for the add-on");
+            expect(apply_override(f, L"framegen.backend=own", error) && !f.framegen_video && !f.framegen_dlss &&
+                       !f.framegen_anr,
+                   "frame generation: own takes the others off");
+        }
         WritePrivateProfileStringW(L"RenoDX.DLSS5", L"NRScreenshotSource", L"1", (engine + L"\\ReShade.ini").c_str());
         write_reshade_config(engine, s, true, true);
         expect(read(L"\\ReShade.ini").find("NRScreenshotSource=1") != std::string::npos,
@@ -304,7 +445,7 @@ int main() {
         write_reshade_config(engine, s, true, true);
         expect(defines() == L"DLSS5_MV_PROVIDER=5,MY_DEFINE=1",
                "from LumeniteFX to the Feeder's own vectors once the Feeder has them; other defines kept");
-        // Updated Glasir, DLSS 5 not yet: Feeder 1.19 with LumeniteFX stays as it was.
+        // The app updated, DLSS 5 not yet: Feeder 1.19 with LumeniteFX stays as it was.
         CreateDirectoryW((engine + L"\\reshade-shaders\\Shaders\\LumeniteFX").c_str(), nullptr);
         touch(L"\\reshade-shaders\\Shaders\\LumeniteFX\\lumenite_Kernel.fx", "x");
         touch(L"\\reshade-shaders\\Shaders\\DLSS5Feeder\\DLSS5_Feed.fx", "#elif DLSS5_MV_PROVIDER == 4\n");
@@ -340,6 +481,22 @@ int main() {
                    read(L"\\ReShade.ini").find("NeuralUplift=1") != std::string::npos &&
                    read(L"\\dlss5-feed.cfg") == "enabled=1\r\nmode=2\r\n",
                "DLSS 5 loaded but off: no effects, add-ons ready for the menu");
+        // RenoDX's notes over the picture: quiet while DLSS 5 is off, given
+        // back when it is on, unless the user was who set them quiet.
+        const std::wstring reshade_ini = engine + L"\\ReShade.ini";
+        auto quiet = [&] {
+            wchar_t v[8] = {};
+            GetPrivateProfileStringW(L"RenoDX.DLSS5", L"UiDoNotDisturb", L"", v, 8, reshade_ini.c_str());
+            return std::wstring(v);
+        };
+        expect(quiet() == L"1", "DLSS 5 off: RenoDX's notes over the picture are hidden");
+        write_reshade_config(engine, s, true, true);
+        expect(quiet() == L"0", "DLSS 5 on: the notes are back");
+        WritePrivateProfileStringW(L"RenoDX.DLSS5", L"UiDoNotDisturb", L"1", reshade_ini.c_str());
+        write_reshade_config(engine, s, true, false);
+        write_reshade_config(engine, s, true, true);
+        expect(quiet() == L"1", "DLSS 5 on: notes the user hid stay hidden");
+        write_reshade_config(engine, s, true, false);
         write_reshade_config(engine, s, false, false);
         expect(read(L"\\ReShade.ini").find("NeuralUplift=0") != std::string::npos, "DLSS 5 off: NeuralUplift=0");
         expect(read(L"\\dlss5-feed.cfg") == "enabled=0\r\nmode=2\r\n", "DLSS 5 off: Feeder off, its other keys kept");
@@ -377,7 +534,7 @@ int main() {
                "release candidates, forks and other tags are not picked");
     }
     {
-        // What changed while playing goes back into glasir.ini, the rest kept.
+        // What changed while playing goes back into the settings file, the rest kept.
         const std::string before = "; top\r\n[audio]\r\n; volume\r\nvolume = 100\r\nboost=100 ; a note\r\n"
                                    "device =\r\n\r\n[window]\r\nmode = borderless\r\n";
         const std::string after = update_settings_text(
@@ -396,7 +553,7 @@ int main() {
         std::wstring error;
         wchar_t temp[MAX_PATH + 1] = {};
         GetTempPathW(MAX_PATH + 1, temp);
-        const std::wstring path = std::wstring(temp) + L"glasir_test_settings.ini";
+        const std::wstring path = std::wstring(temp) + L"app_test_settings.ini";
         DeleteFileW(path.c_str());
         load_settings(path, s, error);  // writes the defaults
         expect(save_settings(path, {{L"audio", L"volume", L"35"}, {L"audio", L"delay_ms", L"120"}}),
@@ -410,52 +567,21 @@ int main() {
         MpvWatch watch;
         watch.on_line(R"({"event":"property-change","id":1,"name":"volume","data":100.000000})");
         expect(!watch.changed("volume"), "watch: nothing before start");
-        watch.track({"volume", "user-data/glasir/audio-boost", "user-data/glasir/audio-delay"});
+        watch.track({"volume", "user-data/app/audio-boost", "user-data/app/audio-delay"});
         watch.on_line(R"({"event":"property-change","id":1,"name":"volume","data":100.000000})");
-        watch.on_line(R"({"event":"property-change","id":2,"name":"user-data/glasir/audio-boost"})");
-        watch.on_line(R"({"event":"property-change","id":2,"name":"user-data/glasir/audio-boost","data":"100"})");
-        watch.on_line(R"({"event":"property-change","id":3,"name":"user-data/glasir/audio-delay","data":"0"})");
-        expect(!watch.changed("volume") && !watch.changed("user-data/glasir/audio-boost"),
+        watch.on_line(R"({"event":"property-change","id":2,"name":"user-data/app/audio-boost"})");
+        watch.on_line(R"({"event":"property-change","id":2,"name":"user-data/app/audio-boost","data":"100"})");
+        watch.on_line(R"({"event":"property-change","id":3,"name":"user-data/app/audio-delay","data":"0"})");
+        expect(!watch.changed("volume") && !watch.changed("user-data/app/audio-boost"),
                "watch: the first values are not changes");
         watch.on_line(R"({"event":"property-change","id":1,"name":"volume","data":85.000000})");
-        watch.on_line(R"({"event":"property-change","id":2,"name":"user-data/glasir/audio-boost","data":"150"})");
-        watch.on_line(R"({"event":"property-change","id":3,"name":"user-data/glasir/audio-delay","data":"30"})");
-        watch.on_line(R"({"event":"property-change","id":3,"name":"user-data/glasir/audio-delay","data":"0"})");
+        watch.on_line(R"({"event":"property-change","id":2,"name":"user-data/app/audio-boost","data":"150"})");
+        watch.on_line(R"({"event":"property-change","id":3,"name":"user-data/app/audio-delay","data":"30"})");
+        watch.on_line(R"({"event":"property-change","id":3,"name":"user-data/app/audio-delay","data":"0"})");
         watch.on_line(R"({"request_id":0,"error":"success"})");
-        expect(watch.changed("volume") == "85" && watch.changed("user-data/glasir/audio-boost") == "150",
+        expect(watch.changed("volume") == "85" && watch.changed("user-data/app/audio-boost") == "150",
                "watch: changed values");
-        expect(!watch.changed("user-data/glasir/audio-delay"), "watch: changed and back is no change");
-    }
-    {
-        // Updates (update.h): versions and GitHub's release answer.
-        int v[3] = {};
-        expect(parse_version(L"v0.2.10", v) && v[0] == 0 && v[1] == 2 && v[2] == 10, "version v0.2.10");
-        expect(parse_version(L"1.0.0", v) && v[0] == 1, "version without v");
-        expect(!parse_version(L"v1.0.0-rc1", v) && !parse_version(L"v1.0", v) && !parse_version(L"", v),
-               "pre-release and short tags are no version");
-        const int a[3] = {0, 2, 0}, b[3] = {0, 1, 9}, c[3] = {0, 2, 0};
-        expect(newer(a, b) && !newer(b, a) && !newer(a, c), "0.2.0 is newer than 0.1.9, not than itself");
-        int now[3];
-        current_version(now);
-        expect(version_text(now) == widen(GLASIR_VERSION), "this build's version");
-
-        const std::string digest(64, 'a');
-        const std::string release = R"({"tag_name":"v0.2.0","html_url":"https://github.com/Abhito/Glasir/releases/tag/v0.2.0",
-            "draft":false,"prerelease":false,"assets":[
-            {"name":"Glasir-0.2.0.zip.sig","browser_download_url":"https://x/sig","size":10,"digest":null},
-            {"name":"Glasir-0.2.0.zip","browser_download_url":"https://x/zip","size":900000,"digest":"sha256:)" +
-                                    digest + R"("}]})";
-        Release r;
-        std::wstring error;
-        expect(read_release(release, r, error) && r.version[1] == 2 && r.zip_url == L"https://x/zip" &&
-                   r.zip_size == 900000 && r.zip_sha256 == digest && r.zip_name == L"Glasir-0.2.0.zip",
-               "release: the zip of its version, with its SHA-256");
-        expect(!read_release(R"({"tag_name":"v0.3.0","assets":[{"name":"Glasir-0.2.0.zip","browser_download_url":"https://x"}]})",
-                             r, error),
-               "release: a zip of another version is not it");
-        expect(!read_release(R"({"tag_name":"v0.3.0","prerelease":true,"assets":[]})", r, error),
-               "release: a pre-release is not offered");
-        expect(!read_release("not json", r, error), "release: not JSON");
+        expect(!watch.changed("user-data/app/audio-delay"), "watch: changed and back is no change");
     }
     {
         // Bug reports: the profile folder is left out, whatever its spelling.
@@ -469,10 +595,53 @@ int main() {
         expect(redact_profile("C:\\Users\\Someone2", L"C:\\") == "C:\\Users\\Someone2", "redact: no real profile");
     }
     {
+        // Bug reports: JPEG pictures of a capture's frames, HDR tone-mapped.
+        const bool com = SUCCEEDED(CoInitializeEx(nullptr, COINIT_MULTITHREADED));
+        WorkDir work(L"test-previews");
+        const std::wstring from = work.path() + L"\\20260101-120000-000", to = work.path() + L"\\out";
+        CreateDirectoryW(from.c_str(), nullptr);
+        // 203 nits (the reference white) in 10-bit PQ is code 594, repeated into 16 bits.
+        const UINT16 white[3] = {UINT16(594 << 6 | 594 >> 4), UINT16(594 << 6 | 594 >> 4), UINT16(594 << 6 | 594 >> 4)};
+        const UINT16 orange[3] = {20, 128, 240};  // B G R
+        expect(write_png(from + L"\\f01.png", 64, 32, true, white) &&
+                   write_png(from + L"\\between_f01_f02.png", 64, 32, false, orange),
+               "previews: a capture to make them of");
+        FramePreviews p;
+        std::wstring error;
+        const bool made = write_frame_previews(from, to, 20u << 20, p, error);
+        std::error_code ec;
+        const uint64_t size = std::filesystem::file_size(to + L"\\f01.jpg", ec) +
+                              std::filesystem::file_size(to + L"\\between_f01_f02.jpg", ec);
+        expect(made && p.frames == 2 && p.width == 64 && p.height == 32 && p.hdr && p.quality == 90 && !ec &&
+                   p.bytes == size && p.source_bytes > 0,
+               "previews: one JPEG a frame, at the frame's size");
+        UINT w = 0, h = 0;
+        BYTE left[3] = {}, right[3] = {};
+        // The reference white is above the knee: 0.75 + 0.25 * tanh(1) = 0.94 of the SDR white, 248 in sRGB.
+        expect(read_pixel(to + L"\\f01.jpg", 8, 16, w, h, left) && read_pixel(to + L"\\f01.jpg", 56, 16, w, h, right) &&
+                   w == 64 && h == 32 && near_to(left[0], 248, 4) && near_to(left[1], 248, 4) && near_to(left[2], 248, 4) &&
+                   right[0] <= 3 && right[1] <= 3 && right[2] <= 3,
+               "previews: HDR (16-bit PQ) tone-mapped as the screenshot is");
+        expect(read_pixel(to + L"\\between_f01_f02.jpg", 8, 16, w, h, left) && near_to(left[0], 20, 6) &&
+                   near_to(left[1], 128, 6) && near_to(left[2], 240, 6),
+               "previews: SDR (8-bit) as it is");
+        expect(write_frame_previews(from, to, 1, p, error) && p.frames == 2 && p.quality == 60 && p.bytes < size,
+               "previews: a lower quality when they are too big");
+        {
+            std::ofstream bad(from + L"\\f02.png", std::ios::binary);
+            bad << "not a PNG";
+        }
+        expect(!write_frame_previews(from, to, 20u << 20, p, error) && error.find(L"f02.png") != std::wstring::npos &&
+                   !std::filesystem::exists(to),
+               "previews: a frame that cannot be read: none, and why");
+        CreateDirectoryW((work.path() + L"\\empty").c_str(), nullptr);
+        expect(!write_frame_previews(work.path() + L"\\empty", to, 20u << 20, p, error), "previews: no frames, none");
+        if (com) CoUninitialize();
+    }
+    {
         Settings s;
         std::wstring error;
-        expect(s.update_check && apply_override(s, L"update.check=0", error) && !s.update_check,
-               "update.check, on by default");
+        expect(apply_override(s, L"update.check=0", error), "update.check from an older " APP_INI " still loads");
         expect(s.scaling == Settings::Scaling::Mpv && apply_override(s, L"video.scaling=VSR", error) &&
                    s.scaling == Settings::Scaling::Vsr && !apply_override(s, L"video.scaling=dlss", error),
                "video.scaling: mpv by default, vsr, not anything else");
@@ -510,10 +679,10 @@ int main() {
                 if (a == arg) return true;
             return false;
         };
-        expect(has(L"--script-opts-append=glasir_scaling-mode=vsr") &&
-                   has(L"--script-opts-append=glasir_scaling-hdr=yes") &&
-                   has(L"--script-opts-append=glasir_scaling-hdr_peak=800") &&
-                   has(L"--script-opts-append=glasir_scaling-vsr=intel"),
+        expect(has(L"--script-opts-append=scaling-mode=vsr") &&
+                   has(L"--script-opts-append=scaling-hdr=yes") &&
+                   has(L"--script-opts-append=scaling-hdr_peak=800") &&
+                   has(L"--script-opts-append=scaling-vsr=intel"),
                "mpv gets the scaling mode, the GPU's VSR and the HDR tags for VSR");
         GpuInfo gpu{L"NVIDIA GeForce RTX 5070 Ti", kVendorNvidia, true};
         expect(std::wstring(vsr_kind(gpu)) == L"nvidia", "VSR: NVIDIA RTX");
@@ -590,7 +759,7 @@ int main() {
         // What is installed against it (components.ini in a scratch folder).
         wchar_t tmp[MAX_PATH];
         GetTempPathW(MAX_PATH, tmp);
-        const std::wstring engine = std::wstring(tmp) + L"glasir_test_components";
+        const std::wstring engine = std::wstring(tmp) + L"app_test_components";
         CreateDirectoryW(engine.c_str(), nullptr);
         const std::wstring ini = engine + L"\\components.ini";
         DeleteFileW(ini.c_str());

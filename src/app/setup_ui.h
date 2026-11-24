@@ -9,10 +9,10 @@
 
 #include "components.h"
 
-namespace glasir {
+namespace app {
 
 struct SetupChoice {
-    bool first_run = false;      // something Glasir needs is missing
+    bool first_run = false;      // something the app needs is missing
     bool offer_dlss5 = true;     // show the "also DLSS 5" box
     bool dlss5_checked = false;  // ticked to start with
     std::wstring notices_file;   // THIRD-PARTY-NOTICES.md, linked from the text
@@ -31,4 +31,8 @@ bool run_with_progress(const wchar_t *title, const ProgressJob &job, bool dialog
 bool run_setup(const std::wstring &engine_dir, const std::vector<Component> &which, Versions versions, bool dialogs,
                std::wstring &error);
 
-}  // namespace glasir
+// NVIDIA's licences for its Video Frame Generation, which is downloaded only
+// once the user has accepted them here. False: not accepted.
+bool ask_video_licence();
+
+}  // namespace app

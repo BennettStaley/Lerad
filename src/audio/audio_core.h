@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT
-// Sample conversion and the bounded, resampling sample queue of Glasir's
+// Sample conversion and the bounded, resampling sample queue of the app's
 // audio plugin.
 //
 // Based on native-audio/audio_core.h of the WASAPI audio plugin by z-er
 // (Josh S) for MPV-SW-Capture, https://github.com/z-er/MPV-SW-Capture,
-// MIT licence, Copyright (c) 2026 TyRaS-SW. Modified for Glasir.
+// MIT licence, Copyright (c) 2026 TyRaS-SW. Modified for this app.
 #pragma once
 #include <algorithm>
 #include <cmath>
@@ -12,7 +12,7 @@
 #include <cstring>
 #include <vector>
 
-namespace glasir::audio {
+namespace app::audio {
 
 struct Stereo {
     float left = 0, right = 0;
@@ -116,10 +116,98 @@ inline size_t queue_target(double input_rate, size_t base, int delay_ms) {
     return base + size_t(std::max(0, delay_ms) * input_rate / 1000.0);
 }
 
+// Takes the click out of a break in the sound. A waveform that stops or
+// jumps at once is heard as a pop: here the last level dies away over about
+// 2 ms instead, and sound that starts (again) comes in over 5 ms.
+class Smooth {
+public:
+    explicit Smooth(double output_rate)
+        : decay_(float(std::exp(-1.0 / (output_rate * .002)))), rise_(float(1.0 / (output_rate * .005))) {}
+
+    // A sample of real sound.
+    Stereo play(Stereo v) {
+        level_ = std::min(1.0f, level_ + rise_);
+        fade_tail();
+        last_ = {v.left * level_ + tail_.left, v.right * level_ + tail_.right};
+        return last_;
+    }
+
+    // A sample with nothing to play.
+    Stereo gap() {
+        cut();
+        fade_tail();
+        last_ = tail_;
+        return last_;
+    }
+
+    // The sound is about to jump (samples were dropped): what was playing
+    // dies away under what comes in.
+    void cut() {
+        if (level_ > 0) {
+            tail_ = last_;
+            level_ = 0;
+        }
+    }
+
+private:
+    void fade_tail() {
+        tail_.left = std::abs(tail_.left) < 1e-6f ? 0 : tail_.left * decay_;
+        tail_.right = std::abs(tail_.right) < 1e-6f ? 0 : tail_.right * decay_;
+    }
+
+    float decay_, rise_, level_ = 0;
+    Stereo tail_, last_;
+};
+
+// Spare samples kept queued beyond what the two devices' periods need, so
+// that a packet a few milliseconds late does not empty the queue. It starts
+// small (latency), grows at once each time the queue runs dry anyway, and
+// comes back down a millisecond at a time after ten minutes in which the
+// spare was never needed. Times in ms from any steady clock.
+class Margin {
+public:
+    static constexpr double kStart = .005, kGrow = .004, kMost = .040;  // seconds of sound
+    static constexpr double kUnused = .008;     // this much always left: the spare is more than needed
+    static constexpr double kStallMs = 60;      // a wait this long is a stall, not a late packet
+    static constexpr double kQuietMs = 600000;
+
+    explicit Margin(double rate) : rate_(rate), extra_(rate * kStart) {}
+
+    size_t samples() const { return size_t(extra_); }
+    double ms() const { return extra_ * 1000 / rate_; }
+
+    // The queue ran dry after waiting waited_ms for the card's next packet.
+    // A stall (the whole program held up) would not be cured by a deeper
+    // queue, so it does not grow it.
+    void ran_dry(double now_ms, double waited_ms) {
+        restart(now_ms);
+        if (waited_ms < kStallMs) extra_ = std::min(rate_ * kMost, extra_ + rate_ * kGrow);
+    }
+
+    // After sound was written: how many samples stayed queued.
+    void left(double now_ms, size_t queued) {
+        if (!started_) restart(now_ms);
+        low_ = std::min(low_, double(queued));
+        if (now_ms - quiet_from_ < kQuietMs) return;
+        if (low_ > rate_ * kUnused) extra_ = std::max(rate_ * kStart, extra_ - rate_ * .001);
+        restart(now_ms);
+    }
+
+private:
+    void restart(double now_ms) {
+        started_ = true;
+        quiet_from_ = now_ms;
+        low_ = 1e300;
+    }
+
+    double rate_, extra_, quiet_from_ = 0, low_ = 1e300;
+    bool started_ = false;
+};
+
 // Volume 0-100 %, boost 100-400 %, mute.
 inline double output_gain(double volume, int boost_percent, bool muted) {
     if (muted) return 0;
     return std::clamp(volume, 0.0, 100.0) / 100.0 * std::clamp(boost_percent, 100, 400) / 100.0;
 }
 
-}  // namespace glasir::audio
+}  // namespace app::audio

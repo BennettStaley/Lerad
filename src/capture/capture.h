@@ -14,7 +14,7 @@
 #include "repeat_filter.h"
 #include "signal_kind.h"
 
-namespace glasir {
+namespace app {
 
 // Opens the device and selects exactly this mode. source is kept so it can be
 // shut down: that releases the card and cancels a read still waiting.
@@ -30,16 +30,16 @@ struct FrameLayout {
 
 // The card is in use by another app: it opens, but the first read fails.
 constexpr HRESULT kCardBusy = static_cast<HRESULT>(0xC00D3704);   // MF_E_HW_MFT_FAILED_START_STREAMING
-// Another app took the card while Glasir was reading it.
+// Another app took the card while the app was reading it.
 constexpr HRESULT kCardTaken = static_cast<HRESULT>(0xC00D3EA3);  // MF_E_VIDEO_RECORDING_DEVICE_PREEMPTED
-// The card's frames come in a layout Glasir cannot pass on (row pitch, size).
+// The card's frames come in a layout the app cannot pass on (row pitch, size).
 constexpr HRESULT kUnreadableFrames = MAKE_HRESULT(SEVERITY_ERROR, FACILITY_ITF, 0x201);
 
 inline bool card_in_use(HRESULT hr) { return hr == kCardBusy || hr == kCardTaken; }
 
 // Follows whether a 10-bit capture carries SDR or HDR (signal_kind.h): the
 // capture thread shows it the frames it sends on, any thread reads found.
-// GLASIR_SIGNAL_LOG=1 logs what it measures every two seconds (else when what
+// env SIGNAL_LOG=1 logs what it measures every two seconds (else when what
 // the frames say changes, and once a minute).
 class SignalMonitor {
 public:
@@ -65,7 +65,8 @@ struct FrameSinks {
 
 // Hands a frame to the slot, minus repeats when deduplicating - unless the
 // frame generation add-on asks for them.
-void deliver_frame(FrameSlot &slot, const FrameSinks &sinks, const BYTE *data, size_t bytes);
+// arrived: when the frame came from the card (QueryPerformanceCounter), 0 for now.
+void deliver_frame(FrameSlot &slot, const FrameSinks &sinks, const BYTE *data, size_t bytes, LONG64 arrived = 0);
 
 // Both run until the source ends or fails, or the slot is stopped, and then
 // stop the slot. status is S_OK when stopped, S_FALSE when the source ended,
@@ -75,4 +76,4 @@ void capture_loop(IMFSourceReader *reader, const FrameLayout &layout, FrameSlot 
 void raw_loop(HANDLE in, const FrameLayout &layout, FrameSlot &slot, const FrameSinks &sinks,
               std::atomic<UINT64> &frames, std::atomic<HRESULT> &status);
 
-}  // namespace glasir
+}  // namespace app

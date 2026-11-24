@@ -15,7 +15,7 @@
 #include "display.h"
 #include "settings.h"
 
-namespace glasir {
+namespace app {
 
 struct MpvPlan {
     std::wstring mpv_exe;
@@ -32,7 +32,7 @@ struct MpvPlan {
     std::wstring dshow_device;    // DirectShow
     std::optional<VideoMode> dshow_mode;  // DirectShow: the mode to ask for, if known
 
-    // The audio plugin (glasir_audio.dll): the endpoint to capture, empty for
+    // The audio plugin (capture_audio.dll): the endpoint to capture, empty for
     // none; audio_missing: the card's audio input was not found (say so).
     std::wstring audio_device;
     std::wstring audio_log;
@@ -44,15 +44,36 @@ struct MpvPlan {
     // The screen mpv opens on (display.h): HDR and brightness decide how an
     // HDR capture is put out.
     DisplayInfo display;
-    // glasir.ini names the screen (display.monitor): mpv opens its window on
+    // The settings file names the screen (display.monitor): mpv opens its window on
     // display. False: mpv's own choice, the primary screen.
     bool on_display = false;
     // The GPU mpv renders on (--d3d11-adapter), empty: mpv's own choice.
     std::wstring d3d11_adapter;
 };
 
+// The settings file's video.mode: what a 10-bit capture is shown as. Such a
+// capture carries SDR or HDR alike, so this can change while playing (the
+// menu's Signal), and with Automatic the picture follows the console.
+enum class PictureMode { Auto, Sdr, Hdr };
+// "auto", "sdr" or "hdr": the settings file's words, and the menu's
+// "script-message app-picture <word>". Anything else is no mode.
+std::optional<PictureMode> picture_mode(const std::string &word);
+const wchar_t *picture_mode_name(PictureMode mode);
+// Whether the frames are shown as HDR. Automatic: as the signal is found to
+// be (signal_kind.h). Else as the mode says, whatever the picture looks like.
+bool shown_as_hdr(PictureMode mode, bool found_hdr);
+
 // mpv's arguments (without the program).
 std::vector<std::wstring> mpv_arguments(const MpvPlan &plan, const Settings &settings);
+// The filter (with its label) that tags raw frames as SDR or HDR10: they
+// carry no tags of their own.
+std::wstring colour_filter(const MpvPlan &plan, const Settings &settings, bool hdr);
+// The IPC commands that show a 10-bit capture as SDR or HDR from now on,
+// without starting mpv again: the tags, scaling.lua's filters, what hdr.h
+// does with an HDR picture on this screen (settings: its [hdr] as it is
+// now), mpv's output, and user-data/app/signal ("hdr" or "sdr") for whoever
+// asks what the frames are shown as.
+std::string picture_commands(const MpvPlan &plan, const Settings &settings, bool hdr);
 // What to load once mpv is up: "-" (stdin) or the DirectShow URL.
 std::wstring mpv_load_target(const MpvPlan &plan);
 
@@ -63,7 +84,7 @@ std::wstring join_command_line(const std::wstring &program, const std::vector<st
 // {"command":[...]} plus a newline, as mpv's IPC reads it.
 std::string ipc_command(const std::vector<std::wstring> &words);
 
-// mpv, in a job object so it ends with Glasir.
+// mpv, in a job object so it ends with the app.
 class MpvProcess {
 public:
     MpvProcess() = default;
@@ -134,4 +155,4 @@ private:
     std::thread thread_;
 };
 
-}  // namespace glasir
+}  // namespace app

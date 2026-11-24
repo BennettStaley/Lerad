@@ -1,15 +1,15 @@
 # SPDX-License-Identifier: MIT
-"""Runs Glasir.exe with the given arguments in a 1280x720 window, asks mpv what
+"""Runs the exe with the given arguments in a 1280x720 window, asks mpv what
 it is playing (size, format, colour, frames shown per second), closes it and
-prints Glasir's log. For checking a real card or the DirectShow fallback.
+prints the app's log. For checking a real card or the DirectShow fallback.
 
-    python tools/probe.py                                   # glasir.ini as it is
+    python tools/probe.py                                   # the settings file as it is
     python tools/probe.py --set video.mode=hdr
     python tools/probe.py --set capture.path=directshow
     python tools/probe.py --grab 3                          # also save 3 frames as PNG
 
 --grab N saves N frames mpv decoded (before ReShade; HDR tone-mapped to a
-normal image by mpv) about 100 ms apart into %TEMP%\glasir_grabs\<time>\,
+normal image by mpv) about 100 ms apart into %TEMP%\<name>_grabs\<time>\,
 for looking at what the card sends.
 """
 import json
@@ -18,10 +18,11 @@ import subprocess
 import sys
 import time
 
-GRABS = os.path.join(os.environ.get('TEMP', '.'), 'glasir_grabs')
+from app_name import NAME, ID, EXE, LOG, PIPE, APP_DIR
 
-APP = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'out', 'Glasir')
-PIPE = r'\\.\pipe\glasir'
+GRABS = os.path.join(os.environ.get('TEMP', '.'), ID + '_grabs')
+
+APP = APP_DIR
 
 
 def connect(timeout=20, process=None):
@@ -68,8 +69,8 @@ def main():
         grabs = int(argv[i + 1])
         del argv[i:i + 2]
     args = ['--no-dialogs', '--set', 'window.mode=windowed'] + argv
-    glasir = subprocess.Popen([os.path.join(APP, 'Glasir.exe')] + args)
-    pipe = connect(process=glasir)
+    process = subprocess.Popen([os.path.join(APP, EXE)] + args)
+    pipe = connect(process=process)
     if pipe:
         try:
             time.sleep(3)
@@ -80,8 +81,8 @@ def main():
             path = request(pipe, ['get_property', 'path'], 4)
             print(f"mpv: {path}: {out.get('w')}x{out.get('h')} {out.get('pixelformat')} {out.get('colormatrix')} "
                   f"{out.get('colorlevels')} {out.get('gamma')}, {(n1 - n0) / (t1 - t0):.1f} fps shown")
-            audio = request(pipe, ['get_property', 'user-data/glasir/audio-status'], 6)
-            stats = request(pipe, ['get_property', 'user-data/glasir/audio-stats'], 7)
+            audio = request(pipe, ['get_property', 'user-data/app/audio-status'], 6)
+            stats = request(pipe, ['get_property', 'user-data/app/audio-stats'], 7)
             print(f'audio: {audio}; {stats}')
             if grabs:
                 grab(pipe, grabs)
@@ -90,14 +91,14 @@ def main():
             print('mpv:', e)
         pipe.close()
     else:
-        print('mpv: no IPC (Glasir ended or mpv did not start)')
+        print(f'mpv: no IPC ({NAME} ended or mpv did not start)')
     try:
-        glasir.wait(15)
+        process.wait(15)
     except subprocess.TimeoutExpired:
-        glasir.kill()
-        print('Glasir did not exit')
-    print('Glasir exit code', glasir.returncode)
-    with open(os.path.join(APP, 'logs', 'glasir.log'), encoding='utf-8-sig', errors='replace') as f:
+        process.kill()
+        print(f'{NAME} did not exit')
+    print(f'{NAME} exit code', process.returncode)
+    with open(os.path.join(APP, 'logs', LOG), encoding='utf-8-sig', errors='replace') as f:
         for line in f:
             print('  ' + (line.rstrip()[:160] + ' ...' if 'started mpv' in line else line.rstrip()))
 

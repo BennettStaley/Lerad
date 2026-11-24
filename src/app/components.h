@@ -1,17 +1,19 @@
 // SPDX-License-Identifier: MIT
-// The third-party programs Glasir runs on, downloaded on the user's PC from
-// where their authors publish them (Glasir does not ship them):
+// The third-party programs the app runs on, downloaded on the user's PC from
+// where their authors publish them (the app does not ship them):
 //
 //   mpv        github.com/zhongfly/mpv-winbuild (GPL)            engine\mpv.exe
 //   ReShade    reshade.me, the build with add-on support          engine\dxgi.dll
 //   DLSS 5     DLSS5-Feeder (jlrouzies-fr), RenoDX-DLSS5 and       engine\...
 //              nvngx_dlssnr.dll (RHI's mirror, RankFTW/rhi-repo),
 //              nvngx_dlss.dll (NVIDIA/DLSS), ReShade.fxh
+//   DLSS FG    nvngx_dlssg.dll (NVIDIA/DLSS): NVIDIA's frame       engine\nvngx_dlssg.dll
+//              generation model, for framegen.backend = dlss
 //
-// Each Glasir installs the versions it was tested with: components.json
-// (built in) names every part's version, address and SHA-256, so a new
-// release of one of them does not reach users before a Glasir tested with it
-// does. A tested download that is no longer offered (mpv's builds are kept
+// Each version of the app installs the versions it was tested with:
+// components.json (built in) names every part's version, address and SHA-256,
+// so a new release of one of them does not reach users before a version of
+// the app tested with it does. A tested download that is no longer offered (mpv's builds are kept
 // about a month) is replaced by the newest. `--setup --newest` installs the
 // newest of everything, to try before tools/pin_components.py pins it.
 //
@@ -27,17 +29,17 @@
 #include <utility>
 #include <vector>
 
-namespace glasir {
+namespace app {
 
-enum class Component { Mpv, ReShade, Dlss5 };
+enum class Component { Mpv, ReShade, Dlss5, DlssFg, Video, Anr };
 
 const wchar_t *component_name(Component c);
 bool component_installed(const std::wstring &engine_dir, Component c);
 // "name version" lines from components.ini, for the log.
 std::vector<std::wstring> installed_versions(const std::wstring &engine_dir);
 
-// One part in its tested version. The parts: mpv, reshade, and DLSS 5's
-// feeder, renodx, dlssnr, dlss and reshade_fxh.
+// One part in its tested version. The parts: mpv, reshade, DLSS 5's
+// feeder, renodx, dlssnr, dlss and reshade_fxh, and DLSS FG's dlssg.
 struct Pin {
     std::wstring version, url;
     std::string sha256;  // of the download
@@ -51,7 +53,7 @@ struct PinSet {
 // False with error set for a part without a version, an https address or a
 // SHA-256 of 64 hex digits; members that are not objects are skipped.
 bool read_pins(const std::string &json, PinSet &pins, std::wstring &error);
-// The set this Glasir was tested with (GLASIR_COMPONENTS=<file>: that
+// The set this version of the app was tested with (env COMPONENTS=<file>: that
 // components.json instead, to try a set before building it in).
 const PinSet &tested_components();
 // Whether the component, as components.ini records it, is the tested one
@@ -88,4 +90,4 @@ bool install_components(const std::wstring &engine_dir, const std::vector<Compon
 // The rhi-repo release tag rule: PREFIX-x.y.z; true with the version parts.
 bool parse_release_tag(const std::wstring &tag, const std::wstring &prefix, int (&version)[3]);
 
-}  // namespace glasir
+}  // namespace app

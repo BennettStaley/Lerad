@@ -9,12 +9,13 @@
 #include <format>
 #include <fstream>
 
+#include "app_version.h"
 #include "log.h"
 #include "mpv_launch.h"
 
 namespace fs = std::filesystem;
 
-namespace glasir {
+namespace app {
 
 bool file_exists(const std::wstring &path) {
     const DWORD a = GetFileAttributesW(path.c_str());
@@ -147,7 +148,7 @@ bool file_version(const std::wstring &path, int (&version)[3]) {
 WorkDir::WorkDir(const wchar_t *what) {
     wchar_t temp[MAX_PATH + 1] = {};
     GetTempPathW(MAX_PATH + 1, temp);
-    path_ = std::format(L"{}glasir-{}-{}-{}", temp, what, GetCurrentProcessId(), GetTickCount64());
+    path_ = std::format(L"{}" APP_ID_W L"-{}-{}-{}", temp, what, GetCurrentProcessId(), GetTickCount64());
     std::error_code ec;
     fs::create_directories(path_, ec);
 }
@@ -219,7 +220,7 @@ bool place(const std::wstring &file, const std::wstring &dest, std::wstring &err
         const DWORD e = GetLastError();
         DeleteFileW(part.c_str());
         error = e == ERROR_SHARING_VIOLATION || e == ERROR_ACCESS_DENIED
-                    ? L"could not replace " + dest + L": it is in use or read-only (close mpv and Glasir)"
+                    ? L"could not replace " + dest + L": it is in use or read-only (close mpv and " APP_NAME_W L")"
                     : std::format(L"could not write {} (error {})", dest, e);
         return false;
     }
@@ -251,4 +252,4 @@ bool read_shared(const std::wstring &path, std::string &data) {
     return ok;
 }
 
-}  // namespace glasir
+}  // namespace app

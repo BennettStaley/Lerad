@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: MIT
-// Setting values in glasir.ini's text without touching anything else (its
-// comments, spacing, other keys). Used by Glasir.exe and by the in-game menu.
+// Setting values in the settings file's text without touching anything else (its
+// comments, spacing, other keys). Used by the exe and by the in-game menu.
 #pragma once
 #include <string>
 #include <vector>
 
-namespace glasir {
+namespace app {
 
 struct IniValue {
     std::string section, key, value;  // UTF-8; section and key match without case
@@ -20,4 +20,4 @@ std::string ini_set_values(const std::string &text, const std::vector<IniValue> 
 // whole. False if it could not be written.
 bool ini_save_values(const std::wstring &path, const std::vector<IniValue> &values);
 
-}  // namespace glasir
+}  // namespace app

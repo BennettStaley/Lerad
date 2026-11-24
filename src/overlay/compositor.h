@@ -4,7 +4,7 @@
 #include <d3d11.h>
 #include <wrl/client.h>
 
-namespace glasir::overlay {
+namespace app::overlay {
 
 enum class Encoding { Sdr = 0, Pq = 1, ScRgb = 2 };
 
@@ -69,4 +69,4 @@ private:
     UINT width_ = 0, height_ = 0;
 };
 
-}  // namespace glasir::overlay
+}  // namespace app::overlay

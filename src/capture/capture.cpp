@@ -7,11 +7,12 @@
 #include <cstring>
 #include <vector>
 
+#include "../common/app_env.h"
 #include "log.h"
 
 using Microsoft::WRL::ComPtr;
 
-namespace glasir {
+namespace app {
 namespace {
 
 constexpr DWORD kVideoStream = static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM);
@@ -30,27 +31,44 @@ void pack_rows(const BYTE *src, LONG pitch, const FrameLayout &layout, std::vect
 // Hands a frame to mpv's slot, minus repeats when deduplicating - unless the
 // add-on asks for them: then a repeat goes out as one (a keepalive does the
 // same), which never displaces a new frame mpv has not taken yet.
-void deliver_frame(FrameSlot &slot, const FrameSinks &sinks, const BYTE *data, size_t bytes) {
+void deliver_frame(FrameSlot &slot, const FrameSinks &sinks, const BYTE *data, size_t bytes, LONG64 arrived) {
     RepeatFilter *repeats = sinks.repeats;
     if (!repeats) {
         if (sinks.signal) sinks.signal->frame(data);
-        slot.publish(data, bytes, true);
+        slot.publish(data, bytes, true, arrived);
         return;
     }
     const bool all = slot.repeats_wanted();
     if (repeats->take(data)) {
         // New pictures, and a still one now and then (the keepalive).
         if (sinks.signal) sinks.signal->frame(data);
-        slot.publish(data, bytes, !repeats->keepalive());
+        slot.publish(data, bytes, !repeats->keepalive(), arrived);
     } else if (all) {
-        slot.publish(data, bytes, false);
+        slot.publish(data, bytes, false, arrived);
     }
+}
+
+// When the card's driver stamped the sample, as a QueryPerformanceCounter
+// value: its own stamp when it gives one that makes sense (within a quarter
+// of a second before now), else now. The driver's stamp leaves out the wait
+// for this thread, so the card's rhythm comes through as it is.
+static LONG64 sample_arrival(IMFSample *sample) {
+    const LONG64 now = qpc_now();
+    UINT64 stamp = 0;  // 100 ns units of the same clock
+    if (FAILED(sample->GetUINT64(MFSampleExtension_DeviceTimestamp, &stamp)) || stamp == 0) return now;
+    static const LONG64 frequency = [] {
+        LARGE_INTEGER f;
+        QueryPerformanceFrequency(&f);
+        return f.QuadPart;
+    }();
+    const LONG64 ticks = frequency == 10'000'000 ? LONG64(stamp)
+                                                 : LONG64(double(stamp) * double(frequency) / 1e7);
+    return ticks <= now && now - ticks < frequency / 4 ? ticks : now;
 }
 
 SignalMonitor::SignalMonitor(Signal shown, UINT32 width, UINT32 height)
     : found(shown), watch_(shown), width_(width), height_(height) {
-    wchar_t value[4] = {};
-    verbose_ = GetEnvironmentVariableW(L"GLASIR_SIGNAL_LOG", value, 4) > 0 && value[0] == L'1';
+    verbose_ = env(L"SIGNAL_LOG").starts_with(L'1');
 }
 
 void SignalMonitor::frame(const BYTE *data) {
@@ -108,7 +126,7 @@ void capture_loop(IMFSourceReader *reader, const FrameLayout &layout, FrameSlot 
     const LONG packed_pitch = static_cast<LONG>(row_bytes(layout.format, layout.width));
     std::vector<BYTE> packed;
     bool logged_pitch = false;
-    // A frame Glasir cannot pass on ends capture with kUnreadableFrames, so
+    // A frame the app cannot pass on ends capture with kUnreadableFrames, so
     // the user is told, instead of an empty window that never fills.
     auto unreadable = [&](const std::wstring &why) {
         log(L"unreadable frames: {}", why);
@@ -134,6 +152,7 @@ void capture_loop(IMFSourceReader *reader, const FrameLayout &layout, FrameSlot 
             break;
         }
         if (!sample) continue;
+        const LONG64 arrived = sample_arrival(sample.Get());
 
         ComPtr<IMFMediaBuffer> buffer;
         if (FAILED(sample->ConvertToContiguousBuffer(&buffer))) continue;
@@ -146,7 +165,7 @@ void capture_loop(IMFSourceReader *reader, const FrameLayout &layout, FrameSlot 
         if (SUCCEEDED(buffer.As(&buffer2d)) && SUCCEEDED(buffer2d->Lock2D(&scan0, &pitch))) {
             bool ok = true;
             if (pitch == packed_pitch) {
-                deliver_frame(slot, sinks, scan0, frame_bytes);
+                deliver_frame(slot, sinks, scan0, frame_bytes, arrived);
                 ++frames;
             } else if (pitch > packed_pitch) {
                 if (!logged_pitch) {
@@ -154,7 +173,7 @@ void capture_loop(IMFSourceReader *reader, const FrameLayout &layout, FrameSlot 
                     logged_pitch = true;
                 }
                 pack_rows(scan0, pitch, layout, packed);
-                deliver_frame(slot, sinks, packed.data(), frame_bytes);
+                deliver_frame(slot, sinks, packed.data(), frame_bytes, arrived);
                 ++frames;
             } else {
                 // Negative (bottom-up) or narrower than the picture.
@@ -171,7 +190,7 @@ void capture_loop(IMFSourceReader *reader, const FrameLayout &layout, FrameSlot 
         if (FAILED(buffer->Lock(&data, nullptr, &len))) continue;
         const bool whole = len >= frame_bytes;
         if (whole) {
-            deliver_frame(slot, sinks, data, frame_bytes);
+            deliver_frame(slot, sinks, data, frame_bytes, arrived);
             ++frames;
         }
         buffer->Unlock();
@@ -184,4 +203,4 @@ void capture_loop(IMFSourceReader *reader, const FrameLayout &layout, FrameSlot 
     if (SUCCEEDED(com)) CoUninitialize();
 }
 
-}  // namespace glasir
+}  // namespace app

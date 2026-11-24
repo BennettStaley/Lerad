@@ -11,11 +11,13 @@
 #include <vector>
 
 #include "devices.h"
+#include "fg_screen.h"
+#include "log.h"
 #include "vrr.h"
 
 using Microsoft::WRL::ComPtr;
 
-namespace glasir {
+namespace app {
 namespace {
 
 // What DXGI says about every output: where it is, which GPU drives it,
@@ -102,6 +104,7 @@ void read_display_config(std::vector<DisplayInfo> &displays) {
                          path.targetInfo.id};
         const bool named = DisplayConfigGetDeviceInfo(&target.header) == ERROR_SUCCESS;
         if (named && target.flags.friendlyNameFromEdid) d.name = target.monitorFriendlyDeviceName;
+        if (named) d.monitor_path = target.monitorDevicePath;
 
         DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO colour{};
         colour.header = {DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO, sizeof(colour),
@@ -188,6 +191,22 @@ const wchar_t *vrr_for_addons(DisplayInfo::Vrr found, int user) {
     }
 }
 
+std::wstring screens_for_addons(const std::vector<DisplayInfo> &displays, const std::wstring &chosen, int user) {
+    std::vector<fg::ScreenFacts> screens;
+    for (const DisplayInfo &d : displays) {
+        if (!d.found || d.device.empty()) continue;
+        fg::ScreenFacts f;
+        f.device = narrow(d.device);
+        f.vrr = fg::vrr_from_word(narrow(vrr_for_addons(d.vrr, names_match(d.device, chosen) ? user : -1)));
+        f.hz = d.refresh_hz;
+        f.monitor = narrow(d.monitor_path);
+        f.name = narrow((d.number > 0 ? std::to_wstring(d.number) : d.device) +
+                        (d.name.empty() ? std::wstring() : L" (" + d.name + L")"));
+        screens.push_back(std::move(f));
+    }
+    return widen(fg::screens_text(screens));
+}
+
 std::wstring display_text(const DisplayInfo &d) {
     if (!d.found) return L"unknown";
     std::wstring t = std::format(L"{}{}x{} @ {:.3f} Hz", d.name.empty() ? L"" : d.name + L", ", d.width, d.height,
@@ -205,4 +224,4 @@ std::wstring display_text(const DisplayInfo &d) {
     return t;
 }
 
-}  // namespace glasir
+}  // namespace app

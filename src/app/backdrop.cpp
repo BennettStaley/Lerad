@@ -8,14 +8,15 @@
 #include <cmath>
 #include <cwchar>
 
+#include "app_version.h"
 #include "log.h"
 
-namespace glasir {
+namespace app {
 namespace {
 
 using Microsoft::WRL::ComPtr;
 
-constexpr wchar_t kClass[] = L"GlasirBackdrop";
+constexpr wchar_t kClass[] = APP_NAME_W L"Backdrop";
 constexpr UINT_PTR kCursorTimer = 1;  // also checks the stacking order
 constexpr UINT_PTR kSyncTimer = 2;
 constexpr UINT_PTR kSettleTimer = 3;
@@ -76,7 +77,7 @@ HMONITOR monitor_by_device(const std::wstring &device) {
     return f.found;
 }
 
-// mpv's window goes to the screen glasir.ini asks for, if mpv opened it on
+// mpv's window goes to the screen the settings file asks for, if mpv opened it on
 // another: over the whole screen when borderless, else the same size in the
 // middle of it.
 void move_to_screen(HWND mpv, const WindowSetup &setup) {
@@ -259,7 +260,7 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) 
     case WM_LBUTTONDOWN:
     case WM_RBUTTONDOWN:
     case WM_MBUTTONDOWN:
-        if (s && IsWindow(s->mpv)) SetForegroundWindow(s->mpv);  // a click on the bars is a click on Glasir
+        if (s && IsWindow(s->mpv)) SetForegroundWindow(s->mpv);  // a click on the bars is a click on the app
         return 0;
     case WM_MOUSEMOVE:
         if (s) {
@@ -369,7 +370,7 @@ void Backdrop::run() {
     state.setup = setup_;
     if (!setup_.fullscreen) move_to_screen(mpv, setup_);
     const RECT mon = monitor_rect(mpv);
-    state.window = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, kClass, L"Glasir", WS_POPUP, mon.left, mon.top,
+    state.window = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, kClass, APP_NAME_W, WS_POPUP, mon.left, mon.top,
                                    mon.right - mon.left, mon.bottom - mon.top, nullptr, nullptr, wc.hInstance, nullptr);
     if (!state.window) {
         log(L"window: no black backdrop ({}); full screen covers the screen and the menu cannot switch it",
@@ -433,4 +434,4 @@ void Backdrop::run() {
     DestroyWindow(state.window);
 }
 
-}  // namespace glasir
+}  // namespace app

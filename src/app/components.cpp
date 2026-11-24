@@ -13,6 +13,7 @@
 #include <optional>
 #include <regex>
 
+#include "app_env.h"
 #include "files.h"
 #include "http.h"
 #include "json.h"
@@ -22,7 +23,7 @@
 
 namespace fs = std::filesystem;
 
-namespace glasir {
+namespace app {
 namespace {
 
 using Headers = std::vector<std::pair<std::wstring, std::wstring>>;
@@ -302,7 +303,7 @@ public:
             if (ec) {
                 const std::wstring why = widen(ec.message());
                 if (!fs::exists(to) && fs::exists(to + L".old")) fs::rename(to + L".old", to, ec);  // put it back
-                error = L"could not replace " + to + L": " + why + L" (close mpv and Glasir)";
+                error = L"could not replace " + to + L": " + why + L" (close mpv and " APP_NAME_W L")";
                 abandon();
                 return false;
             }
@@ -314,7 +315,7 @@ public:
 private:
     static std::wstring in_use(const std::wstring &file, DWORD e) {
         return e == ERROR_SHARING_VIOLATION || e == ERROR_ACCESS_DENIED
-                   ? L"could not replace " + file + L": it is in use or read-only (close mpv and Glasir)"
+                   ? L"could not replace " + file + L": it is in use or read-only (close mpv and " APP_NAME_W L")"
                    : std::format(L"could not replace {} (error {})", file, e);
     }
 
@@ -552,6 +553,165 @@ bool install_dlss5(const std::wstring &engine, Fetcher &f, std::wstring &error) 
     return true;
 }
 
+// ---------------------------------------------------------------- NVIDIA Video Frame Generation
+
+// What the frame generation add-on loads from engine\nvidia-vfg (fg_vfg.h).
+constexpr const wchar_t *kVideoFiles[] = {L"cudart64_12.dll", L"NVCVImage.dll", L"nvngxruntime.dll",
+                                          L"NVVideoEffects.dll", L"nvVFXVideoFrameGeneration.dll"};
+
+// "0.2.0.0" as numbers, to tell which of two is newer.
+std::vector<int> version_numbers(const std::string &text) {
+    std::vector<int> out(1, 0);
+    for (char c : text) {
+        if (c == '.') out.push_back(0);
+        else if (c >= '0' && c <= '9' && out.back() < 100000000) out.back() = out.back() * 10 + (c - '0');
+    }
+    return out;
+}
+
+// NVIDIA publishes the runtime of its Video Effects SDK as a Python package
+// (a zip) on its own package index; the filter's DLLs and NVIDIA's licences
+// are in it. Only asked for by the user, who accepts those licences first
+// (setup_ui.h): the app's own setup never adds it.
+bool install_video(const std::wstring &engine, Fetcher &f, std::wstring &error) {
+    const std::wstring label = L"NVIDIA Video Frame Generation";
+    auto fail = [&](const std::wstring &what) {
+        error = label + L": " + what;
+        return false;
+    };
+    const std::wstring index = L"https://pypi.nvidia.com/nvidia-vfx/";
+    const Lookup newest = [&](Source &s, std::wstring &e) {
+        std::string page;
+        if (!f.dl().get(index, {}, page, e)) return false;
+        // href="nvidia_vfx-0.2.0.0-cp312-abi3-win_amd64.whl#sha256=..."
+        const std::regex link(R"re((nvidia_vfx-([0-9.]+)-cp3[0-9]+-abi3-win_amd64\.whl)#sha256=([0-9a-f]{64}))re");
+        std::vector<int> best;
+        for (std::sregex_iterator it(page.begin(), page.end(), link), end; it != end; ++it) {
+            const std::vector<int> v = version_numbers((*it)[2].str());
+            if (!best.empty() && !std::lexicographical_compare(best.begin(), best.end(), v.begin(), v.end())) continue;
+            best = v;
+            s = {widen((*it)[2].str()), index + widen((*it)[1].str()), (*it)[3].str(), 0};
+        }
+        if (best.empty()) return e = L"no Windows package on pypi.nvidia.com/nvidia-vfx", false;
+        return true;
+    };
+    Got got;
+    if (!f.fetch("vfg", label, newest, got, error)) return false;
+
+    f.dl().step(L"Unpacking " + label);
+    const std::wstring unpacked = f.work() + L"\\vfg";
+    std::vector<std::wstring> members;
+    for (const wchar_t *file : kVideoFiles) members.push_back(std::wstring(L"nvvfx/libs/") + file);
+    if (!unpack(got.file, unpacked, members, error)) return fail(error);
+    const std::wstring stage = f.work() + L"\\nvidia-vfg";
+    std::error_code ec;
+    fs::create_directories(stage + L"\\licenses", ec);
+    for (const wchar_t *file : kVideoFiles) {
+        const std::wstring from = unpacked + L"\\nvvfx\\libs\\" + file;
+        if (!file_exists(from)) return fail(std::wstring(L"no ") + file + L" in the download");
+        std::wstring signer;
+        if (!signed_by(from, L"NVIDIA Corporation", signer))
+            return fail(std::wstring(file) + L" is not signed by NVIDIA (" + signer + L")");
+        fs::copy_file(from, stage + L"\\" + file, fs::copy_options::overwrite_existing, ec);
+        if (ec) return fail(std::wstring(L"could not copy ") + file + L": " + widen(ec.message()));
+    }
+    // NVIDIA's licences as the package has them, kept beside the DLLs.
+    std::wstring no_licences;
+    if (unpack(got.file, unpacked, {L"*.dist-info/licenses"}, no_licences)) {
+        for (fs::recursive_directory_iterator it(unpacked, ec), end; !ec && it != end; it.increment(ec)) {
+            if (!it->is_regular_file(ec) || it->path().wstring().find(L".dist-info") == std::wstring::npos) continue;
+            std::error_code copy_ec;
+            fs::copy_file(it->path(), stage + L"\\licenses\\" + it->path().filename().wstring(),
+                          fs::copy_options::overwrite_existing, copy_ec);
+        }
+    } else {
+        log(L"{}: the package's licence files were not unpacked ({})", label, no_licences);
+    }
+
+    f.dl().step(L"Installing " + label);
+    EngineSwap swap;
+    swap.folder(stage, engine + L"\\nvidia-vfg");
+    if (!swap.run(error)) return fail(error);
+    Record record(engine);
+    record.clear(L"vfg");
+    record.set(L"vfg", L"", got);
+    record.set(L"vfg", L"installed", today());
+    log(L"installed {} {}", label, got.version);
+    return true;
+}
+
+// ---------------------------------------------------------------- ANR FG
+
+// Apex Neural Rendering's frame generation (github.com/apex-compute/ANR):
+// the "addon" package of a release, whose "Apex Neural Rendering FG\dlssg"
+// folder (the library that stands in for nvngx_dlssg.dll and the files it
+// loads from beside it) becomes engine\anr (src/framegen/fg_anr.h). A beta
+// without a licence text: only asked for by the user, never added unasked.
+bool install_anr(const std::wstring &engine, Fetcher &f, std::wstring &error) {
+    const std::wstring label = L"ANR Frame Generation";
+    auto fail = [&](const std::wstring &what) {
+        error = label + L": " + what;
+        return false;
+    };
+    const Lookup newest = [&](Source &s, std::wstring &e) {
+        const auto release = f.dl().json(kGitHubApi + L"apex-compute/ANR/releases/latest", e);
+        if (!release) return false;
+        const auto zip = find_asset(*release, std::wregex(LR"(anr-fg-.*-addon\.zip)", std::regex::icase));
+        if (!zip) return e = L"no add-on package in release " + widen(release->str("tag_name")), false;
+        s = {widen(release->str("tag_name")), zip->url, zip->sha256, zip->size};
+        return true;
+    };
+    Got got;
+    if (!f.fetch("anr", label, newest, got, error)) return false;
+
+    f.dl().step(L"Unpacking " + label);
+    const std::wstring unpacked = f.work() + L"\\anr";
+    if (!unpack(got.file, unpacked, {}, error)) return fail(error);
+    const std::wstring library = find_file(unpacked, L"nvngx_dlssg.dll");
+    if (library.empty()) return fail(L"no nvngx_dlssg.dll in the download");
+    const std::wstring stage = fs::path(library).parent_path().wstring();
+    if (!file_exists(stage + L"\\path_table.json")) return fail(L"the download is not laid out as expected");
+
+    f.dl().step(L"Installing " + label);
+    EngineSwap swap;
+    swap.folder(stage, engine + L"\\anr");
+    if (!swap.run(error)) return fail(error);
+    Record record(engine);
+    record.clear(L"anr");
+    record.set(L"anr", L"", got);
+    record.set(L"anr", L"installed", today());
+    log(L"installed {} {}", label, got.version);
+    return true;
+}
+
+// ---------------------------------------------------------------- DLSS FG
+
+// NVIDIA's frame generation model from its SDK, as published there, signed
+// by NVIDIA. The driver has one too, but NGX gives it only to programs that
+// bring their own (src/framegen/fg_dlss.h).
+bool install_dlssfg(const std::wstring &engine, Fetcher &f, std::wstring &error) {
+    const Lookup newest = [&](Source &s, std::wstring &e) {
+        const auto release = f.dl().json(kGitHubApi + L"NVIDIA/DLSS/releases/latest", e);
+        if (!release) return false;
+        const std::wstring tag = widen(release->str("tag_name"));
+        s = {tag, L"https://github.com/NVIDIA/DLSS/raw/" + tag + L"/lib/Windows_x86_64/rel/nvngx_dlssg.dll", "", 0};
+        return true;
+    };
+    Got got;
+    if (!f.fetch("dlssg", L"NVIDIA DLSS Frame Generation", newest, got, error)) return false;
+    std::wstring signer;
+    if (!signed_by(got.file, L"NVIDIA Corporation", signer))
+        return error = L"DLSS Frame Generation: nvngx_dlssg.dll is not signed by NVIDIA (" + signer + L")", false;
+    if (!place(got.file, engine + L"\\nvngx_dlssg.dll", error)) return false;
+
+    Record record(engine);
+    record.clear(L"dlssfg");
+    record.set(L"dlssfg", L"", got);
+    record.set(L"dlssfg", L"installed", today());
+    log(L"installed DLSS Frame Generation {}", got.version);
+    return true;
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------- public
@@ -561,6 +721,9 @@ const wchar_t *component_name(Component c) {
     case Component::Mpv: return L"mpv";
     case Component::ReShade: return L"ReShade";
     case Component::Dlss5: return L"DLSS 5";
+    case Component::DlssFg: return L"DLSS Frame Generation";
+    case Component::Video: return L"NVIDIA Video Frame Generation";
+    case Component::Anr: return L"ANR Frame Generation";
     }
     return L"?";
 }
@@ -574,6 +737,12 @@ bool component_installed(const std::wstring &engine_dir, Component c) {
                                     L"\\nvngx_dlss.dll", L"\\reshade-shaders\\Shaders\\DLSS5Feeder\\DLSS5_Feed.fx"})
             if (!file_exists(engine_dir + file)) return false;
         return true;
+    case Component::DlssFg: return file_exists(engine_dir + L"\\nvngx_dlssg.dll");
+    case Component::Video:
+        for (const wchar_t *file : kVideoFiles)
+            if (!file_exists(engine_dir + L"\\nvidia-vfg\\" + file)) return false;
+        return true;
+    case Component::Anr: return file_exists(engine_dir + L"\\anr\\nvngx_dlssg.dll");
     }
     return false;
 }
@@ -581,7 +750,7 @@ bool component_installed(const std::wstring &engine_dir, Component c) {
 std::vector<std::wstring> installed_versions(const std::wstring &engine_dir) {
     const std::wstring ini = engine_dir + L"\\components.ini";
     std::vector<std::wstring> out;
-    for (const wchar_t *section : {L"mpv", L"reshade", L"dlss5"}) {
+    for (const wchar_t *section : {L"mpv", L"reshade", L"dlss5", L"dlssfg", L"vfg", L"anr"}) {
         std::vector<wchar_t> keys(16384);
         const DWORD n = GetPrivateProfileSectionW(section, keys.data(), DWORD(keys.size()), ini.c_str());
         std::wstring line;
@@ -633,12 +802,11 @@ const PinSet &tested_components() {
     static const PinSet set = [] {
         PinSet pins;
         std::wstring error;
-        wchar_t file[MAX_PATH] = {};
-        if (const DWORD n = GetEnvironmentVariableW(L"GLASIR_COMPONENTS", file, MAX_PATH); n > 0 && n < MAX_PATH) {
+        if (const std::wstring file = env(L"COMPONENTS"); !file.empty()) {
             std::string text;
             if (!read_shared(file, text)) error = L"it cannot be read";
             if (error.empty() && read_pins(text, pins, error)) {
-                log(L"components: the versions in {} (GLASIR_COMPONENTS)", file);
+                log(L"components: the versions in {} (" APP_ENV_W("COMPONENTS") L")", file);
                 return pins;
             }
             log(L"components: {} is not used ({}); the built-in versions are", file, error);
@@ -658,6 +826,9 @@ bool component_as_tested(const std::wstring &engine_dir, Component c) {
         for (const char *part : kDlss5Parts)
             if (!part_as_tested(engine_dir, part, L"dlss5", widen(part))) return false;
         return true;
+    case Component::DlssFg: return part_as_tested(engine_dir, "dlssg", L"dlssfg", L"");
+    case Component::Video: return part_as_tested(engine_dir, "vfg", L"vfg", L"");
+    case Component::Anr: return part_as_tested(engine_dir, "anr", L"anr", L"");
     }
     return true;
 }
@@ -692,7 +863,7 @@ bool install_components(const std::wstring &engine_dir, const std::vector<Compon
     WorkDir work;
     Downloader dl(progress, cancel);
     Fetcher fetcher(dl, versions, work.path());
-    log(L"setup: {}", versions == Versions::Tested ? L"the versions this Glasir was tested with"
+    log(L"setup: {}", versions == Versions::Tested ? L"the versions this " APP_NAME_W L" was tested with"
                                                    : L"the newest versions (--newest)");
     int index = 0;
     for (Component c : which) {
@@ -703,6 +874,9 @@ bool install_components(const std::wstring &engine_dir, const std::vector<Compon
         case Component::Mpv: ok = install_mpv(engine_dir, fetcher, error); break;
         case Component::ReShade: ok = install_reshade(engine_dir, fetcher, error); break;
         case Component::Dlss5: ok = install_dlss5(engine_dir, fetcher, error); break;
+        case Component::DlssFg: ok = install_dlssfg(engine_dir, fetcher, error); break;
+        case Component::Video: ok = install_video(engine_dir, fetcher, error); break;
+        case Component::Anr: ok = install_anr(engine_dir, fetcher, error); break;
         }
         if (!ok) {
             log(L"setup: {} failed: {}", component_name(c), error);
@@ -722,4 +896,4 @@ bool parse_release_tag(const std::wstring &tag, const std::wstring &prefix, int 
     return true;
 }
 
-}  // namespace glasir
+}  // namespace app
