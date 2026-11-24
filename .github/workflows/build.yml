@@ -1,0 +1,52 @@
+# SPDX-License-Identifier: MIT
+# Builds the app, runs the tests and keeps the release zip. A tag "v1.2.3"
+# also opens a draft release with that zip, to be published by hand.
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # the version line comes from "git describe"
+
+      - name: Build, test and package
+        shell: cmd
+        run: build.cmd vs2022 package
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-zip
+          path: out/*.zip
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-zip
+      - name: Draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: gh release create "$TAG" *.zip --repo "$GITHUB_REPOSITORY" --draft --title "$TAG" --generate-notes
