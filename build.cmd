@@ -46,8 +46,13 @@ if "%CONFIGURE%"=="vs2022" set "RANGE=-version [17.0,18.0)"
 if "%CONFIGURE%"=="vs" set "RANGE=-version [18.0,19.0)"
 set "VSDIR="
 set "VSLINE="
-for /f "usebackq tokens=*" %%i in (`"%VSWHERE%" -latest -products * %RANGE% -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSDIR=%%i"
-for /f "usebackq tokens=*" %%i in (`"%VSWHERE%" -latest -products * %RANGE% -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property catalog_productLineVersion`) do set "VSLINE=%%i"
+rem (Through a file: a version range's bracket would end a "for" command.)
+set "FOUND=%TEMP%\app_build_vs_%RANDOM%.txt"
+"%VSWHERE%" -latest -products * %RANGE% -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath > "%FOUND%"
+set /p VSDIR=<"%FOUND%"
+"%VSWHERE%" -latest -products * %RANGE% -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property catalog_productLineVersion > "%FOUND%"
+set /p VSLINE=<"%FOUND%"
+del "%FOUND%" >nul 2>&1
 if not defined VSDIR (
     echo No Visual Studio with "Desktop development with C++" was found.
     exit /b 1
